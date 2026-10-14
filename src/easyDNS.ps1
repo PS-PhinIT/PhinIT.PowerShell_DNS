@@ -1,9 +1,10 @@
 #requires -RunAsAdministrator
 
 ###############################################################################
-# easyDNS v0.2.10 - Moderne WPF DNS-Verwaltung
+# easyDNS v0.3.0 - Moderne WPF DNS-Verwaltung
 # Komplett überarbeitet mit Windows 11 Design und WPF XAML
 # Optimiert für bessere Performance und Benutzerfreundlichkeit
+# Changelog: siehe CHANGELOG.md im Repository-Root
 ###############################################################################
 
 ###############################################################################
@@ -12,9 +13,9 @@
 $global:AppConfig = @{
     AppName = "easyDNS"
     Author = "PHscripts.de | Andreas Hepp"
-    ScriptVersion = "0.2.27"
-    Website = "https://github.com/PS-easyIT/"
-    LastUpdate = "26.05.2025"
+    ScriptVersion = "0.3.0"
+    Website = "https://github.com/PS-PhinIT/PhinIT.PowerShell_DNS"
+    LastUpdate = "14.10.2026"
     
     # Design-Konfiguration (Windows 11 Style)
     ThemeColors = @{
@@ -74,9 +75,20 @@ $global:AppConfig.TempPath = Join-Path $scriptRoot "Temp"
 
 # Verzeichnisse erstellen falls nicht vorhanden
 @($global:AppConfig.LogPath, $global:AppConfig.ExportPath, $global:AppConfig.ImportPath, $global:AppConfig.TempPath) | ForEach-Object {
-    if (-not (Test-Path $_)) {
-        try { New-Item -ItemType Directory -Path $_ -Force | Out-Null } catch { }
+    $dirPath = $_
+    if (-not (Test-Path $dirPath)) {
+        try {
+            New-Item -ItemType Directory -Path $dirPath -Force | Out-Null
+        } catch {
+            Write-Warning "Could not create directory '$dirPath': $($_.Exception.Message)"
+        }
     }
+}
+
+# WPF benoetigt einen STA-Thread (Standard in Windows PowerShell 5.1 und pwsh 7 unter Windows)
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
+    Write-Error "easyDNS requires a single-threaded apartment (STA). Please start PowerShell with the -STA parameter."
+    exit 1
 }
 
 # Globale Variablen für Performance-Monitoring
@@ -119,6 +131,8 @@ function Write-Log {
     if ($Level -eq "DEBUG" -and -not $global:AppConfig.DebugMode) { return }
     
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    # Zeilenumbrueche entfernen (Schutz vor Log-Injection / gefaelschten Logzeilen)
+    $Message = [string]$Message -replace '[\r\n]+', ' '
     $logEntry = "[$Level] $timestamp [$Component] - $Message"
     
     # Console-Output mit Farben
@@ -214,76 +228,38 @@ function Get-DNSServerDetection {
         Server = "localhost"
         IsLocalDNS = $false
         AutoConnect = $false
-        ServerVersion = "Unknown"
-        Features = @()
     }
     
-    try {
-        # Versuche localhost zuerst - erweiterte Prüfung
-        $dnsFeature = Get-WindowsFeature -Name DNS -ErrorAction SilentlyContinue
-        if ($dnsFeature -and $dnsFeature.Installed) {
-            Write-Log "Lokaler DNS-Server erkannt - Automatische Verbindung wird hergestellt" -Level "INFO" -Component "Detection"
-            $result.Server = 'localhost'
-            $result.IsLocalDNS = $true
-            $result.AutoConnect = $true
-            
-            # Zusätzliche Features prüfen
-            $additionalFeatures = @("RSAT-DNS-Server", "DNS-Server-Tools")
-            foreach ($feature in $additionalFeatures) {
-                $f = Get-WindowsFeature -Name $feature -ErrorAction SilentlyContinue
-                if ($f -and $f.Installed) {
-                    $result.Features += $feature
-                }
-            }
-            
-            return $result
-        }
-    } catch {
-        Write-Log "Windows Feature Abfrage fehlgeschlagen" -Level "DEBUG" -Component "Detection"
-    }
-
-    # Prüfe alternativ ob DNS-Dienst läuft
+    # Lokale DNS-Rolle ueber den Dienst erkennen (schnell, funktioniert in PS 5.1 und 7;
+    # Get-WindowsFeature wird bewusst nicht mehr verwendet: nur auf Servern verfuegbar und in PS 7 sehr langsam)
     try {
         $dnsService = Get-Service -Name "DNS" -ErrorAction SilentlyContinue
-        if ($dnsService -and $dnsService.Status -eq "Running") {
-            Write-Log "DNS-Service is running locally - Automatic connection will be established" -Level "INFO" -Component "Detection"
+        if ($dnsService) {
             $result.Server = 'localhost'
             $result.IsLocalDNS = $true
-            $result.AutoConnect = $true
-            
-            # Versuche Version zu ermitteln
-            try {
-                $dnsProcess = Get-Process -Name "dns" -ErrorAction SilentlyContinue
-                if ($dnsProcess) {
-                    $result.ServerVersion = $dnsProcess.FileVersion
-                }
-            } catch { }
-            
+            if ($dnsService.Status -eq "Running") {
+                Write-Log "DNS service is running locally - automatic connection will be established" -Level "INFO" -Component "Detection"
+                $result.AutoConnect = $true
+            } else {
+                Write-Log "Local DNS service found but not running (Status: $($dnsService.Status))" -Level "WARN" -Component "Detection"
+            }
             return $result
         }
     } catch {
-        Write-Log "DNS-Service check failed" -Level "DEBUG" -Component "Detection"
+        Write-Log "DNS service check failed: $_" -Level "DEBUG" -Component "Detection"
     }
 
-    # Prüfe Remote-DNS-Server in der Umgebung
-    try {
-        $domainDNS = [System.Net.Dns]::GetHostEntry($env:USERDNSDOMAIN).AddressList | Select-Object -First 1
-        if ($domainDNS) {
-            Write-Log "Domain DNS-Server gefunden: $($domainDNS.IPAddressToString)" -Level "INFO" -Component "Detection"
-            $result.Server = $domainDNS.IPAddressToString
-            $result.IsLocalDNS = $false
-            $result.AutoConnect = $false
+    # Pruefe DNS-Server der Domaene
+    if (-not [string]::IsNullOrEmpty($env:USERDNSDOMAIN)) {
+        try {
+            $domainDNS = [System.Net.Dns]::GetHostEntry($env:USERDNSDOMAIN).AddressList | Select-Object -First 1
+            if ($domainDNS) {
+                Write-Log "Domain DNS server found: $($domainDNS.IPAddressToString)" -Level "INFO" -Component "Detection"
+                $result.Server = $domainDNS.IPAddressToString
+            }
+        } catch {
+            Write-Log "Domain DNS server search failed: $_" -Level "DEBUG" -Component "Detection"
         }
-    } catch {
-        Write-Log "Domain DNS-Server Search failed" -Level "DEBUG" -Component "Detection"
-    }
-
-    # Keine lokale DNS-Rolle gefunden - manuelle Verbindung erforderlich
-    if ([string]::IsNullOrEmpty($result.Server)) {
-        Write-Log "No DNS-Server found - Manual server selection required" -Level "WARN" -Component "Detection"
-        $result.Server = ""
-        $result.IsLocalDNS = $false
-        $result.AutoConnect = $false
     }
     
     return $result
@@ -345,7 +321,7 @@ function Test-DNSServerConnection {
     )
     
     # Cache-Prüfung wenn nicht forciert
-    if (-not $ForceCheck -and $global:DNSConnectionStatus.ServerName -eq $ServerName) {
+    if (-not $ForceCheck -and $global:DNSConnectionStatus.ServerName -eq $ServerName -and $global:DNSConnectionStatus.LastChecked) {
         $timeSinceLastCheck = (Get-Date) - $global:DNSConnectionStatus.LastChecked
         if ($timeSinceLastCheck.TotalSeconds -lt $global:DNSConnectionStatus.CacheValidSeconds) {
             Write-Log "DNS-Connection status from cache: $($global:DNSConnectionStatus.IsConnected)" -Level "DEBUG" -Component "Connection"
@@ -354,7 +330,7 @@ function Test-DNSServerConnection {
     }
     
     try {
-        $testZone = Get-DnsServerZone -ComputerName $ServerName -ErrorAction Stop | Select-Object -First 1
+        $null = Get-DnsServerZone -ComputerName $ServerName -ErrorAction Stop | Select-Object -First 1
         
         # Cache aktualisieren
         $global:DNSConnectionStatus.IsConnected = $true
@@ -403,6 +379,260 @@ function Get-SafeString {
 }
 
 ###############################################################################
+# VALIDIERUNGS- UND REMOTE-HILFSFUNKTIONEN
+###############################################################################
+
+function Test-DnsServerName {
+    # Erlaubt Hostnamen/FQDN, IPv4- und IPv6-Adressen. Verhindert Argument-Injection in native Tools (z.B. dnscmd).
+    param([string]$Name)
+    
+    if ([string]::IsNullOrWhiteSpace($Name) -or $Name.Length -gt 253) { return $false }
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($Name, [ref]$ip)) { return $true }
+    return $Name -match '^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9\-_]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9\-_]{0,62}))*\.?$'
+}
+
+function Test-DnsName {
+    # Validiert Zonen- und Hostnamen (inkl. Unterstrich fuer SRV/_msdcs-Namen)
+    param([string]$Name)
+    
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    return $Name -match '^(?=.{1,253}\.?$)[A-Za-z0-9_]([A-Za-z0-9_\-]{0,62})(\.[A-Za-z0-9_]([A-Za-z0-9_\-]{0,62}))*\.?$'
+}
+
+function Test-RecordName {
+    # Erlaubt "@" (Zonen-Apex), Wildcards ("*" bzw. "*.name") und relative Hostnamen
+    param([string]$Name)
+    
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name -eq '@' -or $Name -eq '*') { return $true }
+    if ($Name.StartsWith('*.')) { return (Test-DnsName -Name $Name.Substring(2)) }
+    return (Test-DnsName -Name $Name)
+}
+
+function Test-IsLocalServer {
+    param([string]$ServerName)
+    
+    if ([string]::IsNullOrWhiteSpace($ServerName)) { return $true }
+    $localNames = @('localhost', '.', '127.0.0.1', '::1', $env:COMPUTERNAME)
+    if ($env:USERDNSDOMAIN) { $localNames += "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)" }
+    return ($localNames -contains $ServerName.TrimEnd('.'))
+}
+
+function Get-RemoteParams {
+    # Liefert Splatting-Parameter (-ComputerName) fuer Cmdlets, die lokal ohne ComputerName laufen sollen
+    param([string]$ServerName = $global:Controls.txtDNSServer.Text)
+    
+    if (Test-IsLocalServer -ServerName $ServerName) { return @{} }
+    return @{ ComputerName = $ServerName }
+}
+
+function Get-DnsWinEvent {
+    # Get-WinEvent-Wrapper: "keine Ereignisse gefunden" ist kein Fehler; unterstuetzt Remote-Server
+    param(
+        [hashtable]$FilterHashtable,
+        [int]$MaxEvents = 50,
+        [string]$ServerName = $global:Controls.txtDNSServer.Text
+    )
+    
+    $remoteParams = Get-RemoteParams -ServerName $ServerName
+    try {
+        return @(Get-WinEvent -FilterHashtable $FilterHashtable -MaxEvents $MaxEvents @remoteParams -ErrorAction Stop)
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { return @() }
+        throw
+    }
+}
+
+function Invoke-Ping {
+    # Einheitlicher Ping fuer PowerShell 5.1 und 7 (Test-Connection liefert je nach Version andere Objekte)
+    param(
+        [string]$Target,
+        [int]$Count = 4,
+        [int]$TimeoutMs = 2000
+    )
+    
+    $replies = New-Object System.Collections.Generic.List[object]
+    $ping = New-Object System.Net.NetworkInformation.Ping
+    try {
+        for ($i = 0; $i -lt $Count; $i++) {
+            try {
+                $reply = $ping.Send($Target, $TimeoutMs)
+                $ttl = $null
+                if ($reply.Options) { $ttl = $reply.Options.Ttl }
+                $replies.Add([PSCustomObject]@{
+                    Success = ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success)
+                    Status  = [string]$reply.Status
+                    Address = [string]$reply.Address
+                    TimeMs  = [long]$reply.RoundtripTime
+                    Ttl     = $ttl
+                })
+            } catch {
+                $message = $_.Exception.Message
+                if ($_.Exception.InnerException) { $message = $_.Exception.InnerException.Message }
+                $replies.Add([PSCustomObject]@{ Success = $false; Status = $message; Address = ""; TimeMs = 0; Ttl = $null })
+            }
+        }
+    } finally {
+        $ping.Dispose()
+    }
+    return $replies.ToArray()
+}
+
+function Test-TcpPort {
+    # Schneller TCP-Port-Test mit Timeout (Test-NetConnection ist deutlich langsamer)
+    param(
+        [string]$Target,
+        [int]$Port,
+        [int]$TimeoutMs = 1500
+    )
+    
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $task = $client.ConnectAsync($Target, $Port)
+        if ($task.Wait($TimeoutMs)) {
+            return $client.Connected
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Get-DnsServiceInfo {
+    # DNS-Dienststatus lokal oder auf dem verbundenen Remote-Server ermitteln
+    param([string]$ServerName = $global:Controls.txtDNSServer.Text)
+    
+    if (Test-IsLocalServer -ServerName $ServerName) {
+        $service = Get-Service -Name "DNS" -ErrorAction Stop
+        return [PSCustomObject]@{
+            DisplayName = $service.DisplayName
+            Status      = [string]$service.Status
+            StartType   = [string]$service.StartType
+            IsLocal     = $true
+        }
+    }
+    
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='DNS'" -ComputerName $ServerName -OperationTimeoutSec 15 -ErrorAction Stop
+    if (-not $service) { throw "DNS service not found on '$ServerName'." }
+    return [PSCustomObject]@{
+        DisplayName = $service.DisplayName
+        Status      = [string]$service.State
+        StartType   = [string]$service.StartMode
+        IsLocal     = $false
+    }
+}
+
+function Wait-DnsServiceStatus {
+    param(
+        [string]$ServerName,
+        [string]$DesiredStatus,
+        [int]$TimeoutSeconds = 30
+    )
+    
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $info = Get-DnsServiceInfo -ServerName $ServerName
+        if ($info.Status -eq $DesiredStatus) { return $info }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $info
+}
+
+function Invoke-DnsServiceAction {
+    # Start/Stop/Restart des DNS-Dienstes auf dem verbundenen Server (lokal: *-Service, remote: CIM/Win32_Service)
+    param(
+        [ValidateSet("Start", "Stop", "Restart")]
+        [string]$Action,
+        [string]$ServerName = $global:Controls.txtDNSServer.Text
+    )
+    
+    if (Test-IsLocalServer -ServerName $ServerName) {
+        switch ($Action) {
+            "Start"   { Start-Service -Name "DNS" -ErrorAction Stop }
+            "Stop"    { Stop-Service -Name "DNS" -Force -ErrorAction Stop }
+            "Restart" { Restart-Service -Name "DNS" -Force -ErrorAction Stop }
+        }
+    } else {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='DNS'" -ComputerName $ServerName -OperationTimeoutSec 15 -ErrorAction Stop
+        if (-not $service) { throw "DNS service not found on '$ServerName'." }
+        
+        if ($Action -in @("Stop", "Restart") -and $service.State -ne "Stopped") {
+            $rc = (Invoke-CimMethod -InputObject $service -MethodName StopService -ErrorAction Stop).ReturnValue
+            if ($rc -ne 0) { throw "StopService failed on '$ServerName' (Win32_Service return code $rc)." }
+            $null = Wait-DnsServiceStatus -ServerName $ServerName -DesiredStatus "Stopped"
+        }
+        if ($Action -in @("Start", "Restart")) {
+            $rc = (Invoke-CimMethod -InputObject $service -MethodName StartService -ErrorAction Stop).ReturnValue
+            # 10 = Dienst laeuft bereits
+            if ($rc -ne 0 -and $rc -ne 10) { throw "StartService failed on '$ServerName' (Win32_Service return code $rc)." }
+        }
+    }
+    
+    $desired = if ($Action -eq "Stop") { "Stopped" } else { "Running" }
+    return (Wait-DnsServiceStatus -ServerName $ServerName -DesiredStatus $desired)
+}
+
+function Get-DnsQueryCounters {
+    # Liest die relevanten Zaehler aus Get-DnsServerStatistics (verschachtelte Objekte!)
+    param([string]$ServerName = $global:Controls.txtDNSServer.Text)
+    
+    $stats = Get-DnsServerStatistics -ComputerName $ServerName -ErrorAction Stop
+    $counters = [ordered]@{
+        TotalQueries     = $null
+        SuccessResponses = $null
+        NxDomain         = $null
+        ServFail         = $null
+        Refused          = $null
+        FormError        = $null
+        RecursiveQueries = $null
+        RecursionFailure = $null
+        CacheCurrent     = $null
+        CacheTotal       = $null
+        CacheTimeouts    = $null
+        TSigFailures     = $null
+        ServerStartTime  = $null
+    }
+    if ($stats.Query2Statistics) { $counters.TotalQueries = $stats.Query2Statistics.TotalQueries }
+    if ($stats.ErrorStatistics) {
+        $counters.SuccessResponses = $stats.ErrorStatistics.NoError
+        $counters.NxDomain = $stats.ErrorStatistics.NxDomain
+        $counters.ServFail = $stats.ErrorStatistics.ServFail
+        $counters.Refused = $stats.ErrorStatistics.Refused
+        $counters.FormError = $stats.ErrorStatistics.FormError
+    }
+    if ($stats.RecursionStatistics) {
+        $counters.RecursiveQueries = $stats.RecursionStatistics.QueriesRecursed
+        $counters.RecursionFailure = $stats.RecursionStatistics.RecursionFailure
+    }
+    if ($stats.RecordStatistics) {
+        $counters.CacheCurrent = $stats.RecordStatistics.CacheCurrent
+        $counters.CacheTotal = $stats.RecordStatistics.CacheTotal
+        $counters.CacheTimeouts = $stats.RecordStatistics.CacheTimeouts
+    }
+    if ($stats.SecurityStatistics) { $counters.TSigFailures = $stats.SecurityStatistics.SecurityTSigVerifyFailed }
+    if ($stats.TimeStatistics) { $counters.ServerStartTime = $stats.TimeStatistics.ServerStartTime }
+    return [PSCustomObject]$counters
+}
+
+function New-DnsPrimaryZone {
+    # Legt eine primaere Zone an. "File" = dateibasierte Zone (Server ohne Active Directory)
+    param(
+        [string]$ZoneName,
+        [string]$Replication = "Domain",
+        [string]$ServerName = $global:Controls.txtDNSServer.Text
+    )
+    
+    if ($Replication -like "File*") {
+        Add-DnsServerPrimaryZone -Name $ZoneName -ZoneFile "$($ZoneName.TrimEnd('.')).dns" -ComputerName $ServerName -ErrorAction Stop
+    } else {
+        Add-DnsServerPrimaryZone -Name $ZoneName -ReplicationScope $Replication -ComputerName $ServerName -ErrorAction Stop
+    }
+}
+
+###############################################################################
 # DNS-HILFSFUNKTIONEN (Robuste Implementierungen)
 ###############################################################################
 
@@ -414,12 +644,11 @@ function Get-SafeDnsServerZone {
         [switch]$ReverseOnly
     )
     
-    $list = @()
-    
     $operation = {
+        # Generische Liste statt Array-"+=" (vermeidet O(n^2)-Kopien bei vielen Zonen)
+        $list = New-Object System.Collections.Generic.List[object]
         $rawZones = Get-DnsServerZone -ComputerName $DnsServerName -ErrorAction Stop
         
-        # Parallel processing für bessere Performance
         $zones = $rawZones | Where-Object {
             $_.ZoneName -notin @("RootHints", "Cache", ".") -and $_.ZoneType -ne "Cache"
         }
@@ -474,17 +703,17 @@ function Get-SafeDnsServerZone {
                 }
             }
             
-            $list = $list + $zoneObj
+            $list.Add($zoneObj)
         }
         
-        return $list
+        return ,$list.ToArray()
     }
     
     try {
-        $result = Invoke-SafeOperation -Operation $operation -ErrorMessage "Error fetching DNS zones from $DnsServerName" -Component "DNS" -RetryCount 2
+        $result = @(Invoke-SafeOperation -Operation $operation -ErrorMessage "Error fetching DNS zones from $DnsServerName" -Component "DNS" -RetryCount 2)
         
         Write-Log "DNS-Zones fetched: $($result.Count) zones from server $DnsServerName" -Level "INFO" -Component "DNS"
-        return $result
+        return ,$result
         
     } catch {
         Write-Log "Critical error fetching DNS zones: $_" -Level "ERROR" -Component "DNS"
@@ -506,7 +735,14 @@ function Format-RecordData {
             "SRV"   { return "{0} {1} {2} {3}" -f $record.RecordData.Priority, $record.RecordData.Weight, $record.RecordData.Port, $record.RecordData.DomainName }
             "NS"    { return $record.RecordData.NameServer }
             "SOA"   { return "$($record.RecordData.PrimaryServer) $($record.RecordData.ResponsiblePerson)" }
-            default { return $record.RecordData.ToString() }
+            default {
+                # Generische Darstellung (z.B. DNSKEY, RRSIG, NSEC3) statt des CIM-Klassennamens
+                if ($record.RecordData -and $record.RecordData.CimInstanceProperties) {
+                    return (($record.RecordData.CimInstanceProperties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'PSComputerName' } |
+                        ForEach-Object { "$($_.Name)=$($_.Value)" }) -join '; ')
+                }
+                return [string]$record.RecordData
+            }
         }
     } catch {
         Write-Log "Error formatting record data: $_" -Level "DEBUG" -Component "DNS"
@@ -523,7 +759,8 @@ function Test-RecordDataValid {
     try {
         switch ($RecordType.ToUpper()) {
             "A" {
-                # IPv4-Adresse validieren
+                # IPv4-Adresse validieren (vollstaendige Punktnotation, IPAddress.Parse akzeptiert auch "10.1")
+                if ($RecordData -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $false }
                 $ip = [System.Net.IPAddress]::Parse($RecordData)
                 return $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
             }
@@ -593,17 +830,9 @@ function Get-DNSStatistics {
     try {
         $zones = Get-SafeDnsServerZone -DnsServerName $DnsServerName
         $stats.TotalZones = $zones.Count
-        $stats.ForwardZones = ($zones | Where-Object { -not $_.IsReverse }).Count
-        $stats.ReverseZones = ($zones | Where-Object { $_.IsReverse }).Count
-        $stats.SignedZones = ($zones | Where-Object { $_.IsSigned -eq "Ja" }).Count
-        
-        # Uptime ermitteln (falls localhost)
-        if ($DnsServerName -eq "localhost") {
-            try {
-                $service = Get-Service -Name "DNS" -ErrorAction SilentlyContinue
-                if ($service) { $serviceStatus = $service.Status }
-            } catch { }
-        }
+        $stats.ForwardZones = @($zones | Where-Object { -not $_.IsReverse }).Count
+        $stats.ReverseZones = @($zones | Where-Object { $_.IsReverse }).Count
+        $stats.SignedZones = @($zones | Where-Object { $_.IsSigned -eq "Yes" }).Count
         
     } catch {
         Write-Log "Error fetching DNS statistics: $_" -Level "ERROR"
@@ -616,28 +845,37 @@ function Export-DNSConfiguration {
     param(
         [string]$DnsServerName,
         [string]$ExportPath,
-        [string]$Format = "CSV" # CSV, XML, JSON
+        [string]$Format = "CSV", # CSV, XML, JSON
+        [bool]$IncludeForward = $true,
+        [bool]$IncludeReverse = $true,
+        [bool]$IncludeDNSSEC = $false
     )
     
+    # DNSSEC-Datensaetze werden nur exportiert, wenn ausdruecklich gewuenscht
+    $dnssecTypes = @("DNSKEY", "RRSIG", "NSEC", "NSEC3", "NSEC3PARAM", "DS", "DLV")
+    
     try {
-        $zones = Get-SafeDnsServerZone -DnsServerName $DnsServerName
-        $exportData = @()
+        $zones = Get-SafeDnsServerZone -DnsServerName $DnsServerName | Where-Object {
+            ($IncludeForward -and -not $_.IsReverse) -or ($IncludeReverse -and $_.IsReverse)
+        }
+        $exportData = New-Object System.Collections.Generic.List[object]
         
         foreach ($zone in $zones) {
             try {
                 $records = Get-DnsServerResourceRecord -ZoneName $zone.ZoneName -ComputerName $DnsServerName -ErrorAction Stop
                 
                 foreach ($record in $records) {
-                    $exportData += [PSCustomObject]@{
+                    if (-not $IncludeDNSSEC -and $dnssecTypes -contains [string]$record.RecordType) { continue }
+                    $exportData.Add([PSCustomObject]@{
                         ZoneName = $zone.ZoneName
                         ZoneType = $zone.ZoneType
                         IsReverse = $zone.IsReverse
                         RecordName = $record.HostName
-                        RecordType = $record.RecordType
+                        RecordType = [string]$record.RecordType
                         RecordData = Format-RecordData -record $record
                         TTL = $record.TimeToLive.TotalSeconds
                         TimeStamp = $record.TimeStamp
-                    }
+                    })
                 }
             } catch {
                 Write-Log "Error exporting zone $($zone.ZoneName): $_" -Level "WARN"
@@ -652,11 +890,14 @@ function Export-DNSConfiguration {
                 $exportData | Export-Clixml -Path $ExportPath
             }
             "JSON" {
-                $exportData | ConvertTo-Json -Depth 5 | Out-File -FilePath $ExportPath -Encoding UTF8
+                ConvertTo-Json -InputObject $exportData.ToArray() -Depth 5 | Out-File -FilePath $ExportPath -Encoding UTF8
+            }
+            default {
+                throw "Unsupported export format: $Format"
             }
         }
         
-        Write-Log "DNS configuration exported to $ExportPath (Format: $Format)" -Level "INFO"
+        Write-Log "DNS configuration exported to $ExportPath (Format: $Format, Records: $($exportData.Count))" -Level "INFO"
         return $true
         
     } catch {
@@ -665,97 +906,158 @@ function Export-DNSConfiguration {
     }
 }
 
+function Add-ImportedDnsRecord {
+    # Legt einen importierten Datensatz an (Datenformat entspricht Format-RecordData)
+    param(
+        [string]$ZoneName,
+        [string]$Name,
+        [string]$Type,
+        [string]$Data,
+        [TimeSpan]$TimeToLive,
+        [string]$DnsServerName
+    )
+    
+    $common = @{ ZoneName = $ZoneName; Name = $Name; TimeToLive = $TimeToLive; ComputerName = $DnsServerName; ErrorAction = 'Stop' }
+    switch ($Type) {
+        "A"     { Add-DnsServerResourceRecordA @common -IPv4Address $Data }
+        "AAAA"  { Add-DnsServerResourceRecordAAAA @common -IPv6Address $Data }
+        "CNAME" { Add-DnsServerResourceRecordCName @common -HostNameAlias $Data }
+        "PTR"   { Add-DnsServerResourceRecordPtr @common -PtrDomainName $Data }
+        "TXT"   { Add-DnsServerResourceRecordTxt @common -DescriptiveText $Data }
+        "MX" {
+            $parts = $Data -split '\s+', 2
+            Add-DnsServerResourceRecordMX @common -Preference ([uint16]$parts[0]) -MailExchange $parts[1]
+        }
+        "SRV" {
+            $parts = $Data -split '\s+', 4
+            Add-DnsServerResourceRecordSrv @common -Priority ([uint16]$parts[0]) -Weight ([uint16]$parts[1]) -Port ([uint16]$parts[2]) -DomainName $parts[3]
+        }
+        default { throw "Record type '$Type' is not supported during import" }
+    }
+}
+
 function Import-DNSConfiguration {
     param(
         [string]$DnsServerName,
         [string]$ImportPath,
-        [string]$Format = "CSV"
+        [string]$Format = "CSV",
+        [bool]$OverwriteExisting = $false
     )
     
+    $supportedTypes = @("A", "AAAA", "CNAME", "MX", "PTR", "TXT", "SRV")
+    $imported = 0
+    $failed = 0
+    $skipped = 0
+    
     try {
-        $importData = @()
+        # Schutz vor uebergrossen Dateien (Speicher/UI-Haenger)
+        $fileInfo = Get-Item -LiteralPath $ImportPath -ErrorAction Stop
+        if ($fileInfo.Length -gt 100MB) {
+            throw "Import file is larger than 100 MB and will not be processed."
+        }
         
+        $importData = @()
         switch ($Format.ToUpper()) {
             "CSV" {
-                $importData = Import-Csv -Path $ImportPath -Encoding UTF8
+                $importData = Import-Csv -LiteralPath $ImportPath -Encoding UTF8
             }
             "XML" {
-                $importData = Import-Clixml -Path $ImportPath
+                $importData = Import-Clixml -LiteralPath $ImportPath
             }
             "JSON" {
-                $importData = Get-Content -Path $ImportPath -Encoding UTF8 | ConvertFrom-Json
+                $importData = Get-Content -LiteralPath $ImportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            }
+            default {
+                throw "Unsupported import format: $Format"
             }
         }
         
-        $imported = 0
-        $failed = 0
-        
         # Gruppiere nach Zonen
-        $zoneGroups = $importData | Group-Object ZoneName
+        $zoneGroups = @($importData) | Where-Object { $_ -and $_.ZoneName } | Group-Object ZoneName
         
         foreach ($zoneGroup in $zoneGroups) {
-            $zoneName = $zoneGroup.Name
+            $zoneName = [string]$zoneGroup.Name
             
-            # Prüfe ob Zone existiert
+            if (-not (Test-DnsName -Name $zoneName)) {
+                Write-Log "Invalid zone name '$zoneName' in import file - zone skipped" -Level "WARN"
+                $failed += $zoneGroup.Count
+                continue
+            }
+            
+            # Prüfe ob Zone existiert, sonst anlegen (Forward- und Reverse-Zonen)
             try {
                 $existingZone = Get-DnsServerZone -Name $zoneName -ComputerName $DnsServerName -ErrorAction SilentlyContinue
                 if (-not $existingZone) {
-                    # Zone erstellen
-                    $zoneData = $zoneGroup.Group[0]
-                    if ($zoneData.IsReverse -eq $true -or $zoneData.IsReverse -eq "True") {
-                        # Reverse Zone (vereinfacht)
-                        Write-Log "Skip Reverse Zone $zoneName during import" -Level "WARN"
-                        continue
-                    } else {
-                        Add-DnsServerPrimaryZone -Name $zoneName -ReplicationScope "Domain" -ComputerName $DnsServerName -ErrorAction Stop
-                        Write-Log "Zone $zoneName created" -Level "INFO"
+                    try {
+                        New-DnsPrimaryZone -ZoneName $zoneName -Replication $global:AppConfig.DefaultReplicationScope -ServerName $DnsServerName
+                    } catch {
+                        # Fallback fuer DNS-Server ohne Active Directory
+                        New-DnsPrimaryZone -ZoneName $zoneName -Replication "File" -ServerName $DnsServerName
                     }
+                    Write-Log "Zone $zoneName created during import" -Level "INFO"
                 }
             } catch {
-                Write-Log "Error creating zone" -Level "ERROR"
+                Write-Log "Error creating zone $zoneName during import: $_" -Level "ERROR"
+                $failed += $zoneGroup.Count
                 continue
             }
             
             # Records importieren
             foreach ($record in $zoneGroup.Group) {
+                $recordName = [string]$record.RecordName
+                $recordType = ([string]$record.RecordType).ToUpper()
+                $recordData = [string]$record.RecordData
+                
+                if ($recordType -in @("SOA", "NS") -and $recordName -eq "@") {
+                    $skipped++
+                    continue # System-Records überspringen
+                }
+                
+                if ($supportedTypes -notcontains $recordType) {
+                    Write-Log "Record type $recordType is not supported during import ($recordName)" -Level "WARN"
+                    $skipped++
+                    continue
+                }
+                
+                if (-not (Test-RecordName -Name $recordName) -or -not (Test-RecordDataValid -RecordType $recordType -RecordData $recordData)) {
+                    Write-Log "Invalid record skipped: $recordName ($recordType) '$recordData'" -Level "WARN"
+                    $failed++
+                    continue
+                }
+                
                 try {
-                    if ($record.RecordType -in @("SOA", "NS") -and $record.RecordName -eq "@") {
-                        continue # System-Records überspringen
-                    }
+                    $ttlSeconds = $global:AppConfig.DefaultTTL
+                    $parsedTtl = 0
+                    if ([int]::TryParse([string]$record.TTL, [ref]$parsedTtl) -and $parsedTtl -ge 0) { $ttlSeconds = $parsedTtl }
+                    $ttl = [TimeSpan]::FromSeconds($ttlSeconds)
                     
-                    $ttl = [TimeSpan]::FromSeconds([int]$record.TTL)
-                    
-                    switch ($record.RecordType.ToUpper()) {
-                        "A" {
-                            Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $record.RecordName -IPv4Address $record.RecordData -TimeToLive $ttl -ComputerName $DnsServerName -ErrorAction Stop
-                        }
-                        "CNAME" {
-                            Add-DnsServerResourceRecordCName -ZoneName $zoneName -Name $record.RecordName -HostNameAlias $record.RecordData -TimeToLive $ttl -ComputerName $DnsServerName -ErrorAction Stop
-                        }
-                        "TXT" {
-                            Add-DnsServerResourceRecordTxt -ZoneName $zoneName -Name $record.RecordName -DescriptiveText $record.RecordData -TimeToLive $ttl -ComputerName $DnsServerName -ErrorAction Stop
-                        }
-                        default {
-                            Write-Log "Record type $($record.RecordType) is not supported during import" -Level "WARN"
+                    $existing = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $recordName -RRType $recordType -ComputerName $DnsServerName -ErrorAction SilentlyContinue)
+                    if ($existing.Count -gt 0) {
+                        if (-not $OverwriteExisting) {
+                            $skipped++
                             continue
                         }
+                        foreach ($existingRecord in $existing) {
+                            Remove-DnsServerResourceRecord -InputObject $existingRecord -ZoneName $zoneName -ComputerName $DnsServerName -Force -ErrorAction Stop
+                        }
                     }
                     
+                    Add-ImportedDnsRecord -ZoneName $zoneName -Name $recordName -Type $recordType -Data $recordData -TimeToLive $ttl -DnsServerName $DnsServerName
                     $imported++
                     
                 } catch {
-                    Write-Log "Error importing record $($record.RecordName) ($($record.RecordType)): $_" -Level "ERROR"
+                    Write-Log "Error importing record $recordName ($recordType): $_" -Level "ERROR"
                     $failed++
                 }
             }
         }
         
-        Write-Log "DNS import completed: $imported successful, $failed failed" -Level "INFO"
-        return @{ Success = $imported; Failed = $failed }
+        Write-Log "DNS import completed: $imported successful, $failed failed, $skipped skipped" -Level "INFO"
+        return @{ Success = $imported; Failed = $failed; Skipped = $skipped }
         
     } catch {
         Write-Log "Error importing DNS configuration: $_" -Level "ERROR"
-        return @{ Success = 0; Failed = 0 }
+        return @{ Success = $imported; Failed = $failed; Skipped = $skipped; Error = $_.Exception.Message }
     }
 }
 
@@ -1264,6 +1566,7 @@ $global:XamlString = @"
                                                 <ComboBoxItem Content="Domain" IsSelected="True"/>
                                                 <ComboBoxItem Content="Forest"/>
                                                 <ComboBoxItem Content="Legacy"/>
+                                                <ComboBoxItem Content="File (non-AD)" ToolTip="File-based zone for DNS servers without Active Directory"/>
                                             </ComboBox>
                                             <Button Grid.Column="4" Name="btnCreateZone" Content="Create Zone" 
                                                     Background="#107C10" Style="{StaticResource ModernButton}"/>
@@ -2394,6 +2697,7 @@ $global:XamlString = @"
                                                 <ComboBoxItem Content="Domain" IsSelected="True"/>
                                                 <ComboBoxItem Content="Forest"/>
                                                 <ComboBoxItem Content="Legacy"/>
+                                                <ComboBoxItem Content="File (non-AD)" ToolTip="File-based zone for DNS servers without Active Directory"/>
                                             </ComboBox>
                                             <Button Grid.Column="6" Name="btnCreateReverseZone" Content="Create Zone" 
                                                     Background="#107C10" Style="{StaticResource ModernButton}"/>
@@ -2578,11 +2882,12 @@ $global:XamlString = @"
                                             <ComboBoxItem Content="RSA/SHA-256" IsSelected="True"/>
                                             <ComboBoxItem Content="RSA/SHA-512"/>
                                             <ComboBoxItem Content="ECDSA P-256"/>
+                                            <ComboBoxItem Content="ECDSA P-384"/>
                                         </ComboBox>
                                         <TextBlock Text="Key Length:" Margin="0,0,0,4" Foreground="#1C1C1C"/>
                                         <ComboBox Name="cmbKeyLength" Margin="0,0,0,12" Padding="8,5">
-                                            <ComboBoxItem Content="1024"/>
                                             <ComboBoxItem Content="2048" IsSelected="True"/>
+                                            <ComboBoxItem Content="3072"/>
                                             <ComboBoxItem Content="4096"/>
                                         </ComboBox>
                                         <CheckBox Name="chkAutoRollover" Content="Automatic Key Rollover" 
@@ -2788,9 +3093,9 @@ $global:XamlString = @"
                           VerticalAlignment="Center" FontSize="11" Foreground="#e2e2e2"/>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <TextBlock Text="Copyright 2025 @" FontSize="11" Foreground="#e2e2e2" Margin="0,0,5,0"/>
+                    <TextBlock Text="Copyright 2025-2026 @" FontSize="11" Foreground="#e2e2e2" Margin="0,0,5,0"/>
                     <TextBlock Text="by $($global:AppConfig.Author)" FontSize="11" Foreground="#e2e2e2" Margin="0,0,35,0"/>
-                    <TextBlock Text="$($global:AppConfig.Website)" FontSize="11" Foreground="#d0e8ff" Cursor="Hand"/>
+                    <TextBlock Name="lnkWebsite" Text="$($global:AppConfig.Website)" FontSize="11" Foreground="#d0e8ff" Cursor="Hand" TextDecorations="Underline" ToolTip="Open project website"/>
                 </StackPanel>
 
                 <TextBlock Grid.Column="2" Text="Script Version: $($global:AppConfig.ScriptVersion) - Last Update: $($global:AppConfig.LastUpdate)" 
@@ -2834,7 +3139,7 @@ $global:Controls = @{}
     "cmbDiagZone", "btnRefreshZoneDropDown", "btnZoneInfo", "btnZoneRefresh", "btnZoneTransfer",
     "btnDNSEvents", "btnSystemEvents", "btnSecurityEvents", "btnExportEvents",
     "btnEnableDebugLog", "btnDisableDebugLog", "btnExportStats", "btnNetworkProps",
-    "btnClearOutput", "btnSaveOutput",
+    "btnClearOutput", "btnSaveOutput", "lnkWebsite",
     # Reverse Zones Controls
     "dgReverseZones", "btnRefreshReverseZones", "btnDeleteReverseZone", "txtReverseNetwork", "txtReversePrefix", "cmbReverseReplication", "btnCreateReverseZone",
     # Import/Export Controls
@@ -2930,7 +3235,7 @@ function Show-Panel {
 if ($global:Controls.btnDashboard) {
     $global:Controls.btnDashboard.Add_Click({ Show-Panel "dashboard" })
 } else {
-    Write-Log "FEHLER: btnDashboard Control nicht gefunden!" -Level "ERROR" -Component "UI"
+    Write-Log "ERROR: btnDashboard Control not found!" -Level "ERROR" -Component "UI"
 }
 
 if ($global:Controls.btnForward) {
@@ -2983,8 +3288,12 @@ $global:Controls.btnConnect.Add_Click({
         return
     }
     
-    # Validiere Server-Name/IP
-    $serverName = Get-SafeString -InputString $serverName -RemoveSpecialChars $true
+    # Validiere Server-Name/IP (Hostname, FQDN, IPv4 oder IPv6)
+    if (-not (Test-DnsServerName -Name $serverName)) {
+        Show-MessageBox "The DNS server name '$serverName' is not a valid host name, FQDN or IP address." "Invalid input" "Warning"
+        return
+    }
+    $global:Controls.txtDNSServer.Text = $serverName
     
     # Verbindungsstatus-Cache invalidieren bei Server-Wechsel
     if ($global:DNSConnectionStatus.ServerName -ne $serverName) {
@@ -2994,74 +3303,87 @@ $global:Controls.btnConnect.Add_Click({
         Write-Log "DNS connection status cache invalidated for new server: $serverName" -Level "DEBUG" -Component "Connection"
     }
     
-    $global:Controls.lblStatus.Text = "Status: Verbinde..."
+    $global:Controls.lblStatus.Text = "Status: Connecting..."
     $global:Controls.lblStatus.Foreground = "#FF8C00"
     $global:Controls.btnConnect.IsEnabled = $false
     
-    # Async-Verbindung für bessere UI-Responsiveness
-    $global:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [System.Action]{
-        try {
-            # Teste zuerst die Verbindung
-            $connectionTest = Test-DNSServerConnection -ServerName $serverName
-            
-            if (-not $connectionTest) {
-                throw "DNS-Server is not reachable or DNS role is not installed"
-            }
-            
-            # Hole Basis-Informationen
-            $zones = @(Get-DnsServerZone -ComputerName $serverName -ErrorAction Stop)
-            
-            $global:DetectedDnsServer = $serverName
-            $global:Controls.lblStatus.Text = "Status: connected"
-            $global:Controls.lblStatus.Foreground = "#107C10"
-            
-            Write-Log "Connection to DNS server '$serverName' established ($($zones.Count) zones found)" -Level "SUCCESS" -Component "Connection"
-            
-            # Auto-Refresh starten
-            Start-AutoRefresh
-            
-            # Dashboard aktualisieren
-            if ($global:CurrentPanel -eq "dashboard") {
-                Update-Dashboard
-            }
-            
-            # Erfolgs-Feedback
-            $message = "Successfully connected to DNS server '$serverName'!`n`nFound zones: $($zones.Count)"
-            if ($zones.Count -eq 0) {
-                $message += "`n`nNote: No DNS zones found. Possible missing permissions."
-            }
-            
-            Show-MessageBox $message "Verbindung hergestellt" "Information"
-            
-        } catch {
-            $global:Controls.lblStatus.Text = "Status: Fehler"
-            $global:Controls.lblStatus.Foreground = "#D13438"
-            
-            # Detaillierte Fehleranalyse
-            $errorMessage = "Error connecting to DNS server '$serverName':`n`n"
-            
-            if ($_.Exception.Message -match "Access is denied") {
-                $errorMessage += "Access denied. Please check:`n"
-                $errorMessage += "- Administrative permissions`n"
-                $errorMessage += "- Remote management is enabled`n"
-                $errorMessage += "- Firewall settings"
-            } elseif ($_.Exception.Message -match "RPC") {
-                $errorMessage += "RPC error. Please check:`n"
-                $errorMessage += "- The remote server is reachable`n"
-                $errorMessage += "- Windows Firewall allows RPC`n"
-                $errorMessage += "- The RPC service is running"
-            } else {
-                $errorMessage += $_.Exception.Message
-            }
-            
-            Write-Log "Error connecting to DNS server '$serverName': $_" -Level "ERROR" -Component "Connection"
-            Show-MessageBox $errorMessage "Connection error" "Error"
-            
-        } finally {
-            $global:Controls.btnConnect.IsEnabled = $true
+    # UI einmal rendern lassen, damit der Status sichtbar ist. Die Verbindung wird danach
+    # synchron im Handler aufgebaut - ein spaeter ausgefuehrter Dispatcher-Callback wuerde
+    # die lokale Variable $serverName verlieren und sich unbemerkt mit localhost verbinden.
+    $global:Window.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Render, [System.Action]{})
+    
+    try {
+        # Teste zuerst die Verbindung
+        $connectionTest = Test-DNSServerConnection -ServerName $serverName -ForceCheck
+        
+        if (-not $connectionTest) {
+            throw "DNS-Server is not reachable or DNS role is not installed"
+        }
+        
+        # Hole Basis-Informationen
+        $zones = @(Get-DnsServerZone -ComputerName $serverName -ErrorAction Stop)
+        
+        $global:DetectedDnsServer = $serverName
+        $global:Controls.lblStatus.Text = "Status: connected"
+        $global:Controls.lblStatus.Foreground = "#107C10"
+        
+        Write-Log "Connection to DNS server '$serverName' established ($($zones.Count) zones found)" -Level "SUCCESS" -Component "Connection"
+        
+        # Auto-Refresh starten
+        Start-AutoRefresh
+        
+        # Dashboard aktualisieren
+        if ($global:CurrentPanel -eq "dashboard") {
+            Update-Dashboard
+        }
+        
+        # Erfolgs-Feedback
+        $message = "Successfully connected to DNS server '$serverName'!`n`nFound zones: $($zones.Count)"
+        if ($zones.Count -eq 0) {
+            $message += "`n`nNote: No DNS zones found. Possible missing permissions."
+        }
+        
+        Show-MessageBox $message "Connection established" "Information"
+        
+    } catch {
+        $global:DNSConnectionStatus.IsConnected = $false
+        $global:Controls.lblStatus.Text = "Status: Error"
+        $global:Controls.lblStatus.Foreground = "#D13438"
+        
+        # Detaillierte Fehleranalyse
+        $errorMessage = "Error connecting to DNS server '$serverName':`n`n"
+        
+        if ($_.Exception.Message -match "Access is denied") {
+            $errorMessage += "Access denied. Please check:`n"
+            $errorMessage += "- Administrative permissions`n"
+            $errorMessage += "- Remote management is enabled`n"
+            $errorMessage += "- Firewall settings"
+        } elseif ($_.Exception.Message -match "RPC") {
+            $errorMessage += "RPC error. Please check:`n"
+            $errorMessage += "- The remote server is reachable`n"
+            $errorMessage += "- Windows Firewall allows RPC`n"
+            $errorMessage += "- The RPC service is running"
+        } else {
+            $errorMessage += $_.Exception.Message
+        }
+        
+        Write-Log "Error connecting to DNS server '$serverName': $_" -Level "ERROR" -Component "Connection"
+        Show-MessageBox $errorMessage "Connection error" "Error"
+        
+    } finally {
+        $global:Controls.btnConnect.IsEnabled = $true
+    }
+})
+
+# Footer-Link zur Projekt-Website (nur HTTPS-URLs werden geoeffnet)
+if ($global:Controls.lnkWebsite) {
+    $global:Controls.lnkWebsite.Add_MouseLeftButtonUp({
+        $url = [string]$global:AppConfig.Website
+        if ($url -match '^https://[^\s"]+$') {
+            try { Start-Process -FilePath $url } catch { Write-Log "Could not open website: $_" -Level "WARN" -Component "UI" }
         }
     })
-})
+}
 
 # Forward-Zonen Event-Handler
 $global:Controls.btnRefreshZones.Add_Click({ Update-ForwardZonesList })
@@ -3181,22 +3503,12 @@ function Show-LoadingStatus {
     )
     
     try {
-        # Temporärer Status in der Statusleiste
-        $originalStatus = $global:Controls.lblStatus.Text
-        $originalColor = $global:Controls.lblStatus.Foreground
-        
+        # Temporaerer Status in der Statusleiste (wird von Hide-LoadingStatus zurueckgesetzt)
         $global:Controls.lblStatus.Text = "Status: $Message"
         $global:Controls.lblStatus.Foreground = "#FF8C00"
         
         # UI aktualisieren
         $global:Window.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Render, [System.Action]{})
-        
-        # Nach kurzer Zeit zurücksetzen
-        $global:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [System.Action]{
-            Start-Sleep -Milliseconds 1500
-            $global:Controls.lblStatus.Text = $originalStatus
-            $global:Controls.lblStatus.Foreground = $originalColor
-        })
         
     } catch {
         Write-Log "Error displaying loading status: $_" -Level "DEBUG" -Component "UI"
@@ -3220,10 +3532,18 @@ function Hide-LoadingStatus {
 
 function Update-Dashboard {
     try {
-        # Server Information aktualisieren
+        # Server Information aktualisieren - bei Remote-Verbindung vom verbundenen DNS-Server
+        $cimParams = @{ ErrorAction = 'Stop' }
+        $targetServer = $global:Controls.txtDNSServer.Text
+        if ($global:DNSConnectionStatus.IsConnected -and -not (Test-IsLocalServer -ServerName $targetServer)) {
+            $cimParams.ComputerName = $targetServer
+            $cimParams.OperationTimeoutSec = 10
+        }
+        
         # Betriebssystem
+        $os = $null
         try {
-                $os = Get-CimInstance -ClassName Win32_OperatingSystem
+                $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams
                 if ($os) {
                     $global:Controls.lblOS.Text = "$($os.Caption) $($os.Version)"
                 } else {
@@ -3241,7 +3561,7 @@ function Update-Dashboard {
                 $global:Controls.lblUser.Text = "$domain\$user"
             } catch {
                 $global:Controls.lblUser.Text = "unknown"
-                Write-Log "Fehler beim Abrufen des Benutzers: $_" -Level "DEBUG"
+                Write-Log "Error fetching user: $_" -Level "DEBUG"
             }
             
             # DNS Server Status
@@ -3250,9 +3570,9 @@ function Update-Dashboard {
                 $global:Controls.lblDNSServerStatus.Text = "no server selected"
                 $global:Controls.lblDNSServerStatus.Foreground = "#FF8C00"
             } else {
-                # Prüfe ob verbunden
+                # Prüfe ob verbunden (Ergebnis wird gecacht, siehe Test-DNSServerConnection)
                 try {
-                    $testConnection = Get-DnsServerZone -ComputerName $dnsServer -ErrorAction Stop | Select-Object -First 1
+                    if (-not (Test-DNSServerConnection -ServerName $dnsServer)) { throw "DNS server not reachable" }
                     if ($dnsServer -eq "localhost" -and $global:DNSDetection.IsLocalDNS) {
                         $global:Controls.lblDNSServerStatus.Text = "localhost (connected - local DNS role)"
                     } else {
@@ -3271,24 +3591,21 @@ function Update-Dashboard {
             
             # CPU Auslastung
             try {
-                $cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
-                $cpuCounter = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction SilentlyContinue
-                if ($cpuCounter -and $cpuCounter.CounterSamples -and $cpuCounter.CounterSamples.Count -gt 0) {
-                    $cpuUsage = [math]::Round($cpuCounter.CounterSamples[0].CookedValue, 1)
-                } else {
-                    $cpuUsage = 0
-                }
-                $cpuName = if ($cpu -and $cpu.Name) { $cpu.Name } else { "unknown" }
+                # Win32_Processor.LoadPercentage statt Get-Counter (Zaehlernamen sind lokalisiert, Get-Counter ist langsam)
+                $cpus = @(Get-CimInstance -ClassName Win32_Processor @cimParams)
+                $cpuLoad = $cpus | Where-Object { $null -ne $_.LoadPercentage } | Measure-Object -Property LoadPercentage -Average
+                $cpuUsage = if ($cpuLoad.Count -gt 0) { [math]::Round($cpuLoad.Average, 1) } else { 0 }
+                $cpuName = if ($cpus.Count -gt 0 -and $cpus[0].Name) { $cpus[0].Name.Trim() } else { "unknown" }
                 $global:Controls.lblCPU.Text = "$cpuUsage% ($cpuName)"
             } catch {
                 $global:Controls.lblCPU.Text = "Not available"
-                Write-Log "Fehler beim Abrufen der CPU-Auslastung: $_" -Level "DEBUG"
+                Write-Log "Error fetching CPU usage: $_" -Level "DEBUG"
             }
             
             # RAM Auslastung
             try {
                 if (-not $os) {
-                    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+                    $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams
                 }
                 if ($os -and $os.TotalVisibleMemorySize -and $os.FreePhysicalMemory) {
                     $totalRAM = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
@@ -3306,7 +3623,8 @@ function Update-Dashboard {
             
             # Systempartition (C:)
             try {
-                $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'"
+                $systemDrive = if ($os -and $os.SystemDrive) { $os.SystemDrive } else { "C:" }
+                $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$systemDrive'" @cimParams
                 if ($disk -and $disk.Size -gt 0) {
                     $diskUsed = [math]::Round(($disk.Size - $disk.FreeSpace) / 1GB, 2)
                     $diskTotal = [math]::Round($disk.Size / 1GB, 2)
@@ -3323,7 +3641,7 @@ function Update-Dashboard {
             # System Uptime
             try {
                 if (-not $os) {
-                    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+                    $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams
                 }
                 if ($os -and $os.LastBootUpTime) {
                     $uptime = (Get-Date) - $os.LastBootUpTime
@@ -3337,8 +3655,8 @@ function Update-Dashboard {
                     $global:Controls.lblUptime.Text = "not available"
                 }
             } catch {
-                $global:Controls.lblUptime.Text = "Nicht verfügbar"
-                Write-Log "Fehler beim Abrufen der Uptime: $_" -Level "DEBUG"
+                $global:Controls.lblUptime.Text = "not available"
+                Write-Log "Error fetching uptime: $_" -Level "DEBUG"
             }
         
         # DNS Quick Stats aktualisieren
@@ -3373,7 +3691,7 @@ function Update-Dashboard {
                     $avgRecordsPerZone = [math]::Round($totalRecords / $sampleSize)
                     $estimatedTotal = $avgRecordsPerZone * $zones.Count
                     $stats.RecordsText = if ($zones.Count -gt $sampleSize) { 
-                        "~$estimatedTotal (appreciated)" 
+                        "~$estimatedTotal (estimated)" 
                     } else { 
                         "$totalRecords" 
                     }
@@ -3419,8 +3737,8 @@ DNS Information:
 
 function Update-ForwardZonesList {
     try {
-        Show-LoadingStatus -Message "Lade Forward-Zonen..."
-        $zones = Get-SafeDnsServerZone -DnsServerName $global:Controls.txtDNSServer.Text | Where-Object { -not $_.IsReverse }
+        Show-LoadingStatus -Message "Loading forward zones..."
+        $zones = @(Get-SafeDnsServerZone -DnsServerName $global:Controls.txtDNSServer.Text | Where-Object { -not $_.IsReverse })
         $global:Controls.dgForwardZones.ItemsSource = $zones
         Write-Log "Forward-Zones-List updated: $($zones.Count) zones" -Level "INFO"
         Hide-LoadingStatus
@@ -3440,17 +3758,22 @@ function Create-NewForwardZone {
         return
     }
     
+    if (-not (Test-DnsName -Name $zoneName)) {
+        Show-MessageBox "The zone name '$zoneName' is not a valid DNS name." "Validation error" "Warning"
+        return
+    }
+    
     if (-not $replication) { $replication = "Domain" }
     
     try {
-        Add-DnsServerPrimaryZone -Name $zoneName -ReplicationScope $replication -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop
+        New-DnsPrimaryZone -ZoneName $zoneName -Replication $replication -ServerName $global:Controls.txtDNSServer.Text
         Show-MessageBox "Zone '$zoneName' created successfully!" "Zone created"
         $global:Controls.txtNewZoneName.Clear()
         Update-ForwardZonesList
-        Write-Log "Forward-Zone created: $zoneName" -Level "INFO"
+        Write-Log "Forward-Zone created: $zoneName ($replication)" -Level "INFO"
     } catch {
-        Write-Log "Error creating forward zone" -Level "ERROR"
-        Show-MessageBox "Error creating zone" "Error" "Error"
+        Write-Log "Error creating forward zone '$zoneName': $_" -Level "ERROR"
+        Show-MessageBox "Error creating zone '$zoneName':`n$($_.Exception.Message)`n`nHint: use 'File (non-AD)' replication on DNS servers without Active Directory." "Error" "Error"
     }
 }
 
@@ -3478,7 +3801,7 @@ function Remove-SelectedForwardZone {
 
 function Update-ZonesList {
     try {
-        Show-LoadingStatus -Message "Lade Zonen-Liste..."
+        Show-LoadingStatus -Message "Loading zone list..."
         $zones = Get-SafeDnsServerZone -DnsServerName $global:Controls.txtDNSServer.Text
         $global:Controls.cmbRecordZone.Items.Clear()
         
@@ -3506,22 +3829,22 @@ function Update-RecordsList {
         Show-LoadingStatus -Message "Load DNS-Records for $zoneName..."
         $records = Get-DnsServerResourceRecord -ZoneName $zoneName -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop
         
-        $recordList = @()
+        $recordList = New-Object System.Collections.Generic.List[object]
         foreach ($record in $records) {
             if (($record.RecordType -eq "SOA") -or ($record.RecordType -eq "NS" -and $record.HostName -eq "@")) {
                 continue
             }
             
             $data = Format-RecordData -record $record
-            $recordList += [PSCustomObject]@{
+            $recordList.Add([PSCustomObject]@{
                 Name = $record.HostName
-                Type = $record.RecordType
+                Type = [string]$record.RecordType
                 Data = $data
                 TTL = $record.TimeToLive.TotalSeconds
-            }
+            })
         }
         
-        $global:Controls.dgRecords.ItemsSource = $recordList
+        $global:Controls.dgRecords.ItemsSource = $recordList.ToArray()
         Write-Log "Records for zone '$zoneName' updated: $($records.Count) records" -Level "DEBUG"
         Hide-LoadingStatus
     } catch {
@@ -3533,7 +3856,7 @@ function Update-RecordsList {
 
 function Create-NewRecord {
     $zoneName = $global:Controls.cmbRecordZone.SelectedItem
-    $recordName = Get-SafeString -InputString $global:Controls.txtRecordName.Text.Trim() -RemoveSpecialChars $true
+    $recordName = $global:Controls.txtRecordName.Text.Trim()
     $recordType = $global:Controls.cmbRecordType.SelectedItem.Content
     $recordData = $global:Controls.txtRecordData.Text.Trim()
     $recordTTL = $global:Controls.txtRecordTTL.Text.Trim()
@@ -3548,16 +3871,22 @@ function Create-NewRecord {
         return
     }
     
+    # Name pruefen ("@" = Zonen-Apex, "*" = Wildcard sind erlaubt)
+    if (-not (Test-RecordName -Name $recordName)) {
+        Show-MessageBox "The record name '$recordName' is not valid.`n`nAllowed: host names, '@' (zone apex) and wildcards ('*' or '*.name')." "Validation error" "Warning"
+        return
+    }
+    
     # Validiere Record-Daten
     if (-not (Test-RecordDataValid -RecordType $recordType -RecordData $recordData)) {
         $helpText = switch ($recordType) {
             "A"     { "Enter a valid IPv4 address (e.g. 192.168.1.1)" }
             "AAAA"  { "Enter a valid IPv6 address (e.g. 2001:db8::1)" }
             "CNAME" { "Enter a valid hostname (e.g. server.domain.com)" }
-            "MX"    { "Format: Priorität Mailserver (e.g. 10 mail.domain.com)" }
+            "MX"    { "Format: Priority MailServer (e.g. 10 mail.domain.com)" }
             "TXT"   { "Enter a text (max. 255 characters)" }
             "PTR"   { "Enter a valid hostname" }
-            "SRV"   { "Format: Priorität Gewicht Port Ziel (e.g. 0 5 5060 sip.domain.com)" }
+            "SRV"   { "Format: Priority Weight Port Target (e.g. 0 5 5060 sip.domain.com)" }
             default { "Invalid data format for record type $recordType" }
         }
         Show-MessageBox "Invalid record data!`n`n$helpText" "Validation error" "Warning"
@@ -3592,17 +3921,17 @@ function Create-NewRecord {
                 Add-DnsServerResourceRecordPtr -ZoneName $zoneName -Name $recordName -PtrDomainName $recordData -TimeToLive $timeSpan -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop
             }
             "MX" {
-                $parts = $recordData -split " "
+                $parts = $recordData -split '\s+'
                 if ($parts.Count -ge 2) {
                     $priority = [int]$parts[0]
                     $exchange = $parts[1]
                     Add-DnsServerResourceRecordMX -ZoneName $zoneName -Name $recordName -MailExchange $exchange -Preference $priority -TimeToLive $timeSpan -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop
                 } else {
-                    throw "MX-Record Format: 'Priorität Mailserver'"
+                    throw "MX-Record Format: 'Priority MailServer'"
                 }
             }
             "SRV" {
-                $parts = $recordData -split " "
+                $parts = $recordData -split '\s+'
                 if ($parts.Count -ge 4) {
                     $priority = [int]$parts[0]
                     $weight = [int]$parts[1]
@@ -3642,7 +3971,13 @@ function Remove-SelectedRecord {
     
     if ($result -eq "Yes") {
         try {
-            $records = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $selectedRecord.Name -RRType $selectedRecord.Type -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop
+            $records = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $selectedRecord.Name -RRType $selectedRecord.Type -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop)
+            
+            # Nur den ausgewaehlten Datensatz loeschen - nicht alle Records mit gleichem Namen/Typ
+            $records = @($records | Where-Object { (Format-RecordData -record $_) -eq $selectedRecord.Data })
+            if ($records.Count -eq 0) {
+                throw "The selected record no longer exists on the server. Please refresh the list."
+            }
             
             foreach ($record in $records) {
                 Remove-DnsServerResourceRecord -InputObject $record -ZoneName $zoneName -ComputerName $global:Controls.txtDNSServer.Text -Force -ErrorAction Stop
@@ -3675,18 +4010,28 @@ function Run-Ping {
     $global:Controls.txtDiagnosisOutput.AppendText("=== PING to $target ===`r`n")
     
     try {
-        $results = Test-Connection -ComputerName $target -Count 4 -ErrorAction Stop
+        # Invoke-Ping liefert unter PowerShell 5.1 und 7 identische Ergebnisobjekte
+        $results = @(Invoke-Ping -Target $target -Count 4)
+        $received = @($results | Where-Object { $_.Success })
         
         foreach ($result in $results) {
-            $global:Controls.txtDiagnosisOutput.AppendText("Response from $($result.Address): Time=$($result.ResponseTime)ms TTL=$($result.TimeToLive)`r`n")
+            if ($result.Success) {
+                $global:Controls.txtDiagnosisOutput.AppendText("Response from $($result.Address): Time=$($result.TimeMs)ms TTL=$($result.Ttl)`r`n")
+            } else {
+                $global:Controls.txtDiagnosisOutput.AppendText("No response: $($result.Status)`r`n")
+            }
         }
         
-        $avgTime = ($results | Measure-Object -Property ResponseTime -Average).Average
-        $global:Controls.txtDiagnosisOutput.AppendText("`r`nPing statistics for $target`:")
-        $global:Controls.txtDiagnosisOutput.AppendText("Packages: Sent = 4, Received = $($results.Count), Lost = $(4 - $results.Count)`r`n")
-        $global:Controls.txtDiagnosisOutput.AppendText("Average response time: $([math]::Round($avgTime, 2))ms`r`n`r`n")
+        $global:Controls.txtDiagnosisOutput.AppendText("`r`nPing statistics for $target`:`r`n")
+        $global:Controls.txtDiagnosisOutput.AppendText("Packets: Sent = $($results.Count), Received = $($received.Count), Lost = $($results.Count - $received.Count)`r`n")
+        if ($received.Count -gt 0) {
+            $avgTime = ($received | Measure-Object -Property TimeMs -Average).Average
+            $global:Controls.txtDiagnosisOutput.AppendText("Average response time: $([math]::Round($avgTime, 2))ms`r`n`r`n")
+        } else {
+            $global:Controls.txtDiagnosisOutput.AppendText("`r`n")
+        }
         
-        Write-Log "Ping to $target executed: $($results.Count)/4 responses" -Level "INFO"
+        Write-Log "Ping to $target executed: $($received.Count)/$($results.Count) responses" -Level "INFO"
         
     } catch {
         $global:Controls.txtDiagnosisOutput.AppendText("Ping failed: $_`r`n`r`n")
@@ -3701,7 +4046,7 @@ function Run-Nslookup {
         return
     }
     
-    $global:Controls.txtDiagnosisOutput.AppendText("=== NSLOOKUP für $target ===`r`n")
+    $global:Controls.txtDiagnosisOutput.AppendText("=== NSLOOKUP for $target ===`r`n")
     
     try {
         $results = Resolve-DnsName -Name $target -Server $global:Controls.txtDNSServer.Text -ErrorAction Stop
@@ -3759,12 +4104,12 @@ function Clear-DNSCache {
 
 function Update-ReverseZonesList {
     try {
-        Show-LoadingStatus -Message "Lade Reverse-Zonen..."
+        Show-LoadingStatus -Message "Loading reverse zones..."
         $zones = Get-SafeDnsServerZone -DnsServerName $global:Controls.txtDNSServer.Text | Where-Object { $_.IsReverse }
         
-        $reverseZonesList = @()
+        $reverseZonesList = New-Object System.Collections.Generic.List[object]
         foreach ($zone in $zones) {
-            $network = "Unbekannt"
+            $network = "Unknown"
             if ($zone.ZoneName -match '(\d+)\.(\d+)\.(\d+)\.in-addr\.arpa') {
                 $network = "$($matches[3]).$($matches[2]).$($matches[1]).0/24"
             } elseif ($zone.ZoneName -match '(\d+)\.(\d+)\.in-addr\.arpa') {
@@ -3773,21 +4118,21 @@ function Update-ReverseZonesList {
                 $network = "$($matches[1]).0.0.0/8"
             }
             
-            $reverseZonesList += [PSCustomObject]@{
+            $reverseZonesList.Add([PSCustomObject]@{
                 ZoneName = $zone.ZoneName
                 ZoneType = $zone.ZoneType
                 Network = $network
                 RepScope = $zone.RepScope
-            }
+            })
         }
         
-        $global:Controls.dgReverseZones.ItemsSource = $reverseZonesList
-        Write-Log "Reverse-Zonen-Liste aktualisiert: $($reverseZonesList.Count) Zonen" -Level "INFO"
+        $global:Controls.dgReverseZones.ItemsSource = $reverseZonesList.ToArray()
+        Write-Log "Reverse zones list updated: $($reverseZonesList.Count) zones" -Level "INFO"
         Hide-LoadingStatus
     } catch {
-        Write-Log "Fehler beim Aktualisieren der Reverse-Zonen-Liste: $_" -Level "ERROR"
+        Write-Log "Error updating reverse zones list: $_" -Level "ERROR"
         Hide-LoadingStatus
-        Show-MessageBox "Fehler beim Laden der Reverse-Zonen: $_" "Fehler" "Error"
+        Show-MessageBox "Error loading reverse zones: $_" "Error" "Error"
     }
 }
 
@@ -3797,39 +4142,48 @@ function Create-NewReverseZone {
     $replication = $global:Controls.cmbReverseReplication.SelectedItem.Content
     
     if ([string]::IsNullOrEmpty($network)) {
-        Show-MessageBox "Bitte geben Sie ein Netzwerk ein (z.B. 192.168.1)." "Validierungsfehler" "Warning"
+        Show-MessageBox "Please enter a network (e.g. 192.168.1)." "Validation error" "Warning"
         return
     }
     
     if (-not $replication) { $replication = "Domain" }
     if ([string]::IsNullOrEmpty($prefix)) { $prefix = "24" }
+    $prefix = $prefix.TrimStart('/')
     
     try {
-        # Netzwerk validieren
-        $networkParts = $network -split '\.'
-        if ($networkParts.Count -lt 3) {
-            Show-MessageBox "Ungueltiges Netzwerkformat. Verwenden Sie z.B. 192.168.1" "Validierungsfehler" "Warning"
+        # Prefix validieren (nur oktettbasierte Reverse-Zonen)
+        if ($prefix -notin @("8", "16", "24")) {
+            Show-MessageBox "Only /8, /16 and /24 networks are supported." "Validation error" "Warning"
             return
         }
+        $prefixLength = [int]$prefix
+        $octetCount = $prefixLength / 8
         
-        # Reverse Zone Name erstellen
-        $reverseZoneName = ""
-        switch ([int]$prefix) {
-            24 { $reverseZoneName = "$($networkParts[2]).$($networkParts[1]).$($networkParts[0]).in-addr.arpa" }
-            16 { $reverseZoneName = "$($networkParts[1]).$($networkParts[0]).in-addr.arpa" }
-            8  { $reverseZoneName = "$($networkParts[0]).in-addr.arpa" }
-            default { 
-                Show-MessageBox "Nur /8, /16 und /24 Netzwerke werden unterstuetzt." "Validierungsfehler" "Warning"
-                return 
+        # Netzwerk validieren: jedes Oktett 0-255; ueberzaehlige Oktette (z.B. "192.168.1.0") werden ignoriert
+        $networkParts = @($network.TrimEnd('.') -split '\.')
+        if ($networkParts.Count -lt $octetCount -or $networkParts.Count -gt 4) {
+            Show-MessageBox "Invalid network format for /$prefixLength. Example: 192.168.1 (/24), 172.16 (/16), 10 (/8)" "Validation error" "Warning"
+            return
+        }
+        foreach ($part in $networkParts) {
+            $octet = -1
+            if ($part -notmatch '^\d{1,3}$' -or -not [int]::TryParse($part, [ref]$octet) -or $octet -gt 255) {
+                Show-MessageBox "Invalid octet '$part' in network '$network'. Each octet must be between 0 and 255." "Validation error" "Warning"
+                return
             }
         }
         
-        Add-DnsServerPrimaryZone -Name $reverseZoneName -ReplicationScope $replication -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop
-        Show-MessageBox "Reverse-Zone '$reverseZoneName' wurde erfolgreich erstellt!" "Zone erstellt"
+        # Reverse Zone Name erstellen
+        $relevant = @($networkParts[0..($octetCount - 1)])
+        [array]::Reverse($relevant)
+        $reverseZoneName = "$($relevant -join '.').in-addr.arpa"
+        
+        New-DnsPrimaryZone -ZoneName $reverseZoneName -Replication $replication -ServerName $global:Controls.txtDNSServer.Text
+        Show-MessageBox "Reverse zone '$reverseZoneName' created successfully!" "Zone created"
         
         $global:Controls.txtReverseNetwork.Clear()
         Update-ReverseZonesList
-        Write-Log "Reverse-Zone erstellt: $reverseZoneName fuer Netzwerk $network/$prefix" -Level "INFO"
+        Write-Log "Reverse zone created: $reverseZoneName for network $network/$prefix" -Level "INFO"
         
     } catch {
         Write-Log "Error creating Reverse-Zone: $_" -Level "ERROR"
@@ -3849,7 +4203,7 @@ function Remove-SelectedReverseZone {
     if ($result -eq "Yes") {
         try {
             Remove-DnsServerZone -Name $selectedZone.ZoneName -ComputerName $global:Controls.txtDNSServer.Text -Force -ErrorAction Stop
-            Show-MessageBox "Reverse-Zone '$($selectedZone.ZoneName)' wurde erfolgreich gelöscht!" "Zone gelöscht"
+            Show-MessageBox "Reverse zone '$($selectedZone.ZoneName)' deleted successfully!" "Zone deleted"
             Update-ReverseZonesList
             Write-Log "Reverse-Zone deleted: $($selectedZone.ZoneName)" -Level "INFO"
         } catch {
@@ -3888,7 +4242,19 @@ function Export-DNSData {
     $global:Controls.txtImportExportLog.AppendText("File: $exportPath`r`n`r`n")
     
     try {
-        $success = Export-DNSConfiguration -DnsServerName $global:Controls.txtDNSServer.Text -ExportPath $exportPath -Format $format
+        $exportParams = @{
+            DnsServerName  = $global:Controls.txtDNSServer.Text
+            ExportPath     = $exportPath
+            Format         = $format
+            IncludeForward = [bool]$global:Controls.chkExportForwardZones.IsChecked
+            IncludeReverse = [bool]$global:Controls.chkExportReverseZones.IsChecked
+            IncludeDNSSEC  = [bool]$global:Controls.chkExportDNSSEC.IsChecked
+        }
+        if (-not $exportParams.IncludeForward -and -not $exportParams.IncludeReverse) {
+            Show-MessageBox "Please select at least forward or reverse zones for the export." "Nothing to export" "Warning"
+            return
+        }
+        $success = Export-DNSConfiguration @exportParams
         
         if ($success) {
             $global:Controls.txtImportExportLog.AppendText("[OK] Export successful!`r`n")
@@ -3932,14 +4298,19 @@ function Import-DNSData {
         return
     }
     
-    if (-not (Test-Path $importPath)) {
+    if (-not (Test-Path -LiteralPath $importPath -PathType Leaf)) {
         Show-MessageBox "The selected file does not exist." "File not found" "Error"
         return
     }
     
     if (-not $format) { $format = "CSV" }
     
-    $result = [System.Windows.MessageBox]::Show("Do you want to import the DNS configuration from the file?`n`nFile: $importPath`nFormat: $format`n`nExisting records could be overwritten!", "Confirm import", "YesNo", "Question")
+    $overwrite = [bool]$global:Controls.chkOverwriteExisting.IsChecked
+    $overwriteText = if ($overwrite) { "Existing records with the same name and type WILL BE REPLACED!" } else { "Existing records with the same name and type will be skipped." }
+    if ($format -eq "XML") {
+        $overwriteText += "`n`nNote: XML (Clixml) files are deserialized - only import files from trusted sources."
+    }
+    $result = [System.Windows.MessageBox]::Show("Do you want to import the DNS configuration from the file?`n`nFile: $importPath`nFormat: $format`n`n$overwriteText", "Confirm import", "YesNo", "Question")
     
     if ($result -eq "Yes") {
         $global:Controls.txtImportExportLog.AppendText("=== DNS IMPORT STARTED ===`r`n")
@@ -3947,13 +4318,19 @@ function Import-DNSData {
         $global:Controls.txtImportExportLog.AppendText("File: $importPath`r`n`r`n")
         
         try {
-            $importResult = Import-DNSConfiguration -DnsServerName $global:Controls.txtDNSServer.Text -ImportPath $importPath -Format $format
+            $importResult = Import-DNSConfiguration -DnsServerName $global:Controls.txtDNSServer.Text -ImportPath $importPath -Format $format -OverwriteExisting $overwrite
             
+            if ($importResult.Error) {
+                $global:Controls.txtImportExportLog.AppendText("[ERROR] $($importResult.Error)`r`n")
+            }
             $global:Controls.txtImportExportLog.AppendText("=== IMPORT COMPLETED ===`r`n")
             $global:Controls.txtImportExportLog.AppendText("Success: $($importResult.Success) Records`r`n")
-            $global:Controls.txtImportExportLog.AppendText("Failed: $($importResult.Failed) Records`r`n`r`n")
+            $global:Controls.txtImportExportLog.AppendText("Failed: $($importResult.Failed) Records`r`n")
+            $global:Controls.txtImportExportLog.AppendText("Skipped: $($importResult.Skipped) Records (existing, system or unsupported - see log file)`r`n`r`n")
             
-            Show-MessageBox "Import abgeschlossen!`n`nErfolgreich: $($importResult.Success) Records`nFehlgeschlagen: $($importResult.Failed) Records" "Import abgeschlossen"
+            $summary = "Import completed!`n`nSuccessful: $($importResult.Success) records`nFailed: $($importResult.Failed) records`nSkipped: $($importResult.Skipped) records"
+            if ($importResult.Error) { $summary += "`n`nError: $($importResult.Error)" }
+            Show-MessageBox $summary "Import completed"
             
             # Aktuelle Panels aktualisieren
             if ($global:CurrentPanel -eq "forward") { Update-ForwardZonesList }
@@ -3961,7 +4338,7 @@ function Import-DNSData {
             if ($global:CurrentPanel -eq "records") { Update-ZonesList }
             
         } catch {
-            $global:Controls.txtImportExportLog.AppendText("[ERROR] Import-Fehler: $_`r`n`r`n")
+            $global:Controls.txtImportExportLog.AppendText("[ERROR] Import error: $_`r`n`r`n")
             Show-MessageBox "Error importing:`n$_" "Error" "Error"
             Write-Log "DNS-Import failed: $_" -Level "ERROR"
         }
@@ -3972,48 +4349,68 @@ function Import-DNSData {
 # DNSSEC FUNKTIONEN
 ###############################################################################
 
+# Cache der Signaturschluessel je Zone (wird von Update-DNSSECStatus befuellt)
+$global:DNSSECKeyCache = @{}
+
+function Get-SelectedDNSSECZoneName {
+    # Zone aus der ComboBox oder - falls leer - aus der Tabelle
+    if ($global:Controls.cmbDNSSECZone.SelectedItem) { return [string]$global:Controls.cmbDNSSECZone.SelectedItem }
+    if ($global:Controls.dgDNSSECZones.SelectedItem) { return [string]$global:Controls.dgDNSSECZones.SelectedItem.ZoneName }
+    return $null
+}
+
+function Get-DNSSECKeySummary {
+    param([object[]]$Keys, [string]$KeyType)
+    
+    $typed = @($Keys | Where-Object { [string]$_.KeyType -eq $KeyType })
+    if ($typed.Count -eq 0) { return "None" }
+    return (($typed | ForEach-Object { "$($_.CryptoAlgorithm) ($($_.CurrentState))" }) -join ", ")
+}
+
 function Update-DNSSECStatus {
     try {
-        Show-LoadingStatus -Message "Lade DNSSEC-Status..."
-        $zones = Get-SafeDnsServerZone -DnsServerName $global:Controls.txtDNSServer.Text | Where-Object { -not $_.IsReverse }
+        Show-LoadingStatus -Message "Loading DNSSEC status..."
+        $server = $global:Controls.txtDNSServer.Text
+        $zones = @(Get-SafeDnsServerZone -DnsServerName $server | Where-Object { -not $_.IsReverse })
         
-        $dnssecList = @()
+        $global:DNSSECKeyCache = @{}
+        $dnssecList = New-Object System.Collections.Generic.List[object]
         foreach ($zone in $zones) {
-            try {
-                $kskStatus = "N/A"
-                $zskStatus = "N/A"
-                $nextRollover = "N/A"
-                
-                # Versuche DNSSEC-Informationen abzurufen
+            $kskStatus = "N/A"
+            $zskStatus = "N/A"
+            $nextRollover = "N/A"
+            
+            # Schluesselinformationen nur fuer signierte Zonen abfragen (spart viele RPC-Aufrufe)
+            if ($zone.IsSigned -eq "Yes") {
                 try {
-                    $keys = Get-DnsServerDnsSecZoneSetting -ZoneName $zone.ZoneName -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction SilentlyContinue
-                    if ($keys) {
-                        $kskStatus = "Active"
-                        $zskStatus = "Active"
-                        $nextRollover = "Auto"
-                    }
+                    $keys = @(Get-DnsServerSigningKey -ZoneName $zone.ZoneName -ComputerName $server -ErrorAction Stop)
+                    $global:DNSSECKeyCache[$zone.ZoneName] = $keys
+                    $kskStatus = Get-DNSSECKeySummary -Keys $keys -KeyType "KeySigningKey"
+                    $zskStatus = Get-DNSSECKeySummary -Keys $keys -KeyType "ZoneSigningKey"
+                    $rollovers = @($keys | Where-Object { $_.NextRolloverTime } | Sort-Object NextRolloverTime | Select-Object -First 1)
+                    $nextRollover = if ($rollovers.Count -gt 0) { ([datetime]$rollovers[0].NextRolloverTime).ToString("yyyy-MM-dd HH:mm") } else { "Disabled" }
                 } catch {
-                    # Ignoriere DNSSEC-Fehler für nicht-signierte Zonen
+                    Write-Log "Error fetching DNSSEC keys for zone $($zone.ZoneName): $_" -Level "DEBUG"
+                    $kskStatus = "Error"
+                    $zskStatus = "Error"
                 }
-                
-                $dnssecList += [PSCustomObject]@{
-                    ZoneName = $zone.ZoneName
-                    DNSSECStatus = $zone.DNSSECStatus
-                    KSKStatus = $kskStatus
-                    ZSKStatus = $zskStatus
-                    NextRollover = $nextRollover
-                }
-            } catch {
-                Write-Log "Error fetching DNSSEC information for zone $($zone.ZoneName): $_" -Level "DEBUG"
             }
+            
+            $dnssecList.Add([PSCustomObject]@{
+                ZoneName = $zone.ZoneName
+                DNSSECStatus = $zone.DNSSECStatus
+                KSKStatus = $kskStatus
+                ZSKStatus = $zskStatus
+                NextRollover = $nextRollover
+            })
         }
         
-        $global:Controls.dgDNSSECZones.ItemsSource = $dnssecList
+        $global:Controls.dgDNSSECZones.ItemsSource = $dnssecList.ToArray()
         
         # DNSSEC Zone ComboBox aktualisieren
         $global:Controls.cmbDNSSECZone.Items.Clear()
         foreach ($zone in $zones) {
-            $global:Controls.cmbDNSSECZone.Items.Add($zone.ZoneName)
+            $null = $global:Controls.cmbDNSSECZone.Items.Add($zone.ZoneName)
         }
         
         if ($global:Controls.cmbDNSSECZone.Items.Count -gt 0) {
@@ -4030,68 +4427,43 @@ function Update-DNSSECStatus {
     }
 }
 
+function Set-DNSSECStatusText {
+    param([string]$Text, [string]$Color = "#107C10")
+    $global:Controls.lblDNSSECStatus.Text = $Text
+    $global:Controls.lblDNSSECStatus.Foreground = $Color
+}
+
 function Sign-SelectedZone {
     $selectedZone = $global:Controls.dgDNSSECZones.SelectedItem
     if (-not $selectedZone) {
         Show-MessageBox "Please select a zone to sign." "No selection" "Warning"
         return
     }
+    $zoneName = [string]$selectedZone.ZoneName
+    $server = $global:Controls.txtDNSServer.Text
     
-    $result = [System.Windows.MessageBox]::Show("Do you want to sign the zone '$($selectedZone.ZoneName)' with DNSSEC?`n`nThis creates keys and signs all records in the zone.", "Sign zone", "YesNo", "Question")
+    $result = [System.Windows.MessageBox]::Show("Do you want to sign the zone '$zoneName' with DNSSEC?`n`nIf no signing keys exist, the default DNSSEC settings (KSK + ZSK) are used.", "Sign zone", "YesNo", "Question")
+    if ($result -ne "Yes") { return }
     
-    if ($result -eq "Yes") {
-        try {
-            $global:Controls.lblDNSSECStatus.Text = "Signing zone..."
-            $global:Controls.lblDNSSECStatus.Foreground = "#FF8C00"
-            
-            # Vereinfachte DNSSEC-Signierung (funktioniert moeglicherweise nicht auf allen Systemen)
-            try {
-                # Prüfe erst, ob bereits DNSSEC-Schlüssel existieren
-                $existingKeys = Get-DnsServerSigningKey -ZoneName $selectedZone.ZoneName -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction SilentlyContinue
-                
-                if ($existingKeys) {
-                    # Versuche Rollover zu aktivieren
-                    Enable-DnsServerSigningKeyRollover -ZoneName $selectedZone.ZoneName -KeyId $existingKeys[0].KeyId -ComputerName $global:Controls.txtDNSServer.Text -Force -ErrorAction Stop
-                    
-                    $global:Controls.lblDNSSECStatus.Text = "Zone successfully signed"
-                    $global:Controls.lblDNSSECStatus.Foreground = "#107C10"
-                    
-                    Show-MessageBox "Zone '$($selectedZone.ZoneName)' was successfully signed with DNSSEC!" "DNSSEC activated"
-                    Update-DNSSECStatus
-                    Write-Log "DNSSEC activated for zone: $($selectedZone.ZoneName)" -Level "INFO"
-                } else {
-                    # Keine Schlüssel vorhanden - manuelle Konfiguration erforderlich
-                    throw "No DNSSEC keys found"
-                }
-                
-            } catch {
-                # Fallback: Manuelle DNSSEC-Konfiguration anzeigen
-                $global:Controls.lblDNSSECStatus.Text = "DNSSEC-Configuration required"
-                $global:Controls.lblDNSSECStatus.Foreground = "#FF8C00"
-                
-                $manualSteps = @"
-Manual DNSSEC configuration required:
-
-1. Create keys:
-   Add-DnsServerSigningKey -ZoneName '$($selectedZone.ZoneName)' -Type KSK
-   Add-DnsServerSigningKey -ZoneName '$($selectedZone.ZoneName)' -Type ZSK
-
-2. Sign zone:
-   Invoke-DnsServerZoneSigning -ZoneName '$($selectedZone.ZoneName)'
-
-3. Alternatively via DNS-Manager:
-   DNS-Manager -> Zone -> Right-click -> "DNSSEC -> Sign zone"
-"@
-                
-                Show-MessageBox $manualSteps "Manual DNSSEC configuration" "Information"
-            }
-            
-        } catch {
-            $global:Controls.lblDNSSECStatus.Text = "Error signing zone"
-            $global:Controls.lblDNSSECStatus.Foreground = "#D13438"
-            Write-Log "Error signing DNSSEC for zone $($selectedZone.ZoneName): $_" -Level "ERROR"
-            Show-MessageBox "Error signing zone:`n$_" "Error" "Error"
+    try {
+        Set-DNSSECStatusText "Signing zone..." "#FF8C00"
+        $global:Window.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Render, [System.Action]{})
+        
+        $existingKeys = @(Get-DnsServerSigningKey -ZoneName $zoneName -ComputerName $server -ErrorAction SilentlyContinue)
+        if ($existingKeys.Count -gt 0) {
+            Invoke-DnsServerZoneSign -ZoneName $zoneName -ComputerName $server -Force -ErrorAction Stop
+        } else {
+            Invoke-DnsServerZoneSign -ZoneName $zoneName -ComputerName $server -SignWithDefault -Force -ErrorAction Stop
         }
+        
+        Set-DNSSECStatusText "Zone '$zoneName' signed"
+        Write-Log "DNSSEC: zone signed: $zoneName" -Level "INFO" -Component "DNSSEC"
+        Show-MessageBox "Zone '$zoneName' was successfully signed with DNSSEC!" "DNSSEC activated"
+        Update-DNSSECStatus
+    } catch {
+        Set-DNSSECStatusText "Error signing zone" "#D13438"
+        Write-Log "Error signing zone $zoneName with DNSSEC: $_" -Level "ERROR" -Component "DNSSEC"
+        Show-MessageBox "Error signing zone '$zoneName':`n$($_.Exception.Message)" "Error" "Error"
     }
 }
 
@@ -4101,68 +4473,206 @@ function Unsign-SelectedZone {
         Show-MessageBox "Please select a zone to remove DNSSEC signing from." "No selection" "Warning"
         return
     }
+    $zoneName = [string]$selectedZone.ZoneName
     
-    $result = [System.Windows.MessageBox]::Show("Do you want to remove the DNSSEC signing for zone '$($selectedZone.ZoneName)'?`n`nThis removes all DNSSEC keys and signatures!", "Remove DNSSEC", "YesNo", "Warning")
+    $result = [System.Windows.MessageBox]::Show("Do you want to remove the DNSSEC signing for zone '$zoneName'?`n`nAll DNSSEC signatures (RRSIG, NSEC/NSEC3, DNSKEY) are removed. Resolvers that expect signed answers (DS record in parent zone!) will fail validation.", "Remove DNSSEC", "YesNo", "Warning")
+    if ($result -ne "Yes") { return }
     
-    if ($result -eq "Yes") {
-        try {
-            # Vereinfachte DNSSEC-Entfernung
-            Show-MessageBox "DNSSEC removal must be performed manually.`n`nUse the DNS console or PowerShell:`n`nRemove-DnsServerSigningKey -ZoneName '$($selectedZone.ZoneName)' -All" "Manual Action Required" "Information"
-            Write-Log "DNSSEC removal requested for zone: $($selectedZone.ZoneName)" -Level "INFO"
-            
-        } catch {
-            Write-Log "Error removing DNSSEC signing: $_" -Level "ERROR"
-            Show-MessageBox "Error removing DNSSEC signing:`n$_" "Error" "Error"
-        }
+    try {
+        Set-DNSSECStatusText "Unsigning zone..." "#FF8C00"
+        Invoke-DnsServerZoneUnsign -ZoneName $zoneName -ComputerName $global:Controls.txtDNSServer.Text -Force -ErrorAction Stop
+        Set-DNSSECStatusText "Zone '$zoneName' unsigned"
+        Write-Log "DNSSEC: zone unsigned: $zoneName" -Level "INFO" -Component "DNSSEC"
+        Show-MessageBox "DNSSEC signing was removed from zone '$zoneName'." "DNSSEC removed"
+        Update-DNSSECStatus
+    } catch {
+        Set-DNSSECStatusText "Error removing DNSSEC" "#D13438"
+        Write-Log "Error removing DNSSEC signing from $zoneName`: $_" -Level "ERROR" -Component "DNSSEC"
+        Show-MessageBox "Error removing DNSSEC signing:`n$($_.Exception.Message)" "Error" "Error"
     }
 }
 
 function Generate-DNSSECKeys {
-    $zoneName = $global:Controls.cmbDNSSECZone.SelectedItem
+    $zoneName = Get-SelectedDNSSECZoneName
+    if (-not $zoneName) {
+        Show-MessageBox "Please select a zone." "No zone selected" "Warning"
+        return
+    }
+    $server = $global:Controls.txtDNSServer.Text
+    
+    $algorithmText = if ($global:Controls.cmbDNSSECAlgorithm.SelectedItem) { [string]$global:Controls.cmbDNSSECAlgorithm.SelectedItem.Content } else { "RSA/SHA-256" }
+    $algorithm = switch ($algorithmText) {
+        "RSA/SHA-512" { "RsaSha512" }
+        "ECDSA P-256" { "ECDsaP256Sha256" }
+        "ECDSA P-384" { "ECDsaP384Sha384" }
+        default       { "RsaSha256" }
+    }
+    $keyLengthText = if ($global:Controls.cmbKeyLength.SelectedItem) { [string]$global:Controls.cmbKeyLength.SelectedItem.Content } else { "2048" }
+    $autoRollover = [bool]$global:Controls.chkAutoRollover.IsChecked
+    
+    $lengthInfo = if ($algorithm -like "Rsa*") { ", key length $keyLengthText bit" } else { "" }
+    $result = [System.Windows.MessageBox]::Show("Create a new Key Signing Key (KSK) and Zone Signing Key (ZSK) for zone '$zoneName'?`n`nAlgorithm: $algorithmText$lengthInfo`nAutomatic rollover: $autoRollover`n`nThe zone must be (re-)signed afterwards.", "Generate DNSSEC keys", "YesNo", "Question")
+    if ($result -ne "Yes") { return }
+    
+    try {
+        Set-DNSSECStatusText "Generating keys..." "#FF8C00"
+        $created = New-Object System.Collections.Generic.List[object]
+        foreach ($keyType in @("KeySigningKey", "ZoneSigningKey")) {
+            $keyParams = @{
+                ZoneName        = $zoneName
+                ComputerName    = $server
+                Type            = $keyType
+                CryptoAlgorithm = $algorithm
+                PassThru        = $true
+                ErrorAction     = 'Stop'
+            }
+            # Schluessellaenge ist nur fuer RSA relevant (ECDSA hat feste Laengen)
+            if ($algorithm -like "Rsa*") { $keyParams.KeyLength = [uint32]$keyLengthText }
+            $key = Add-DnsServerSigningKey @keyParams
+            if ($key) { $created.Add($key) }
+        }
+        
+        if (-not $autoRollover) {
+            foreach ($key in $created) {
+                Disable-DnsServerSigningKeyRollover -ZoneName $zoneName -KeyId $key.KeyId -ComputerName $server -Force -ErrorAction Stop
+            }
+        }
+        
+        Set-DNSSECStatusText "Keys generated for '$zoneName'"
+        Write-Log "DNSSEC: KSK+ZSK ($algorithm) created for zone $zoneName (AutoRollover: $autoRollover)" -Level "INFO" -Component "DNSSEC"
+        Show-MessageBox "Key Signing Key and Zone Signing Key were created for zone '$zoneName'.`n`nUse 'Sign zone' to (re-)sign the zone with the new keys." "DNSSEC keys created"
+        Update-DNSSECStatus
+    } catch {
+        Set-DNSSECStatusText "Error generating keys" "#D13438"
+        Write-Log "Error during DNSSEC key generation for $zoneName`: $_" -Level "ERROR" -Component "DNSSEC"
+        Show-MessageBox "Error during key generation:`n$($_.Exception.Message)" "Error" "Error"
+    }
+}
+
+function Export-DNSSECKeys {
+    # Exportiert die oeffentlichen DNSKEY-Datensaetze (z.B. fuer DS-Eintrag beim Registrar). Private Schluessel werden NICHT exportiert.
+    $zoneName = Get-SelectedDNSSECZoneName
     if (-not $zoneName) {
         Show-MessageBox "Please select a zone." "No zone selected" "Warning"
         return
     }
     
     try {
-        Show-MessageBox "Key generation must be performed via the DNS console or extended PowerShell commands.`n`nExample commands:`n`nAdd-DnsServerSigningKey -ZoneName '$zoneName' -Type KSK -CryptoAlgorithm RsaSha256`nAdd-DnsServerSigningKey -ZoneName '$zoneName' -Type ZSK -CryptoAlgorithm RsaSha256" "DNSSEC Keys" "Information"
-        Write-Log "DNSSEC key generation requested for zone: $zoneName" -Level "INFO"
+        $records = @(Get-DnsServerResourceRecord -ZoneName $zoneName -RRType DNSKEY -ComputerName $global:Controls.txtDNSServer.Text -ErrorAction Stop)
+        if ($records.Count -eq 0) {
+            Show-MessageBox "Zone '$zoneName' has no DNSKEY records. Sign the zone first." "No DNSSEC keys" "Information"
+            return
+        }
         
+        $exportPath = Show-SaveFileDialog -Filter "CSV Files (*.csv)|*.csv|JSON Files (*.json)|*.json" -Title "Export public DNSSEC keys (DNSKEY)"
+        if (-not $exportPath) { return }
+        
+        $exportData = foreach ($record in $records) {
+            $entry = [ordered]@{ ZoneName = $zoneName; HostName = $record.HostName; TTL = $record.TimeToLive.TotalSeconds }
+            foreach ($prop in $record.RecordData.CimInstanceProperties) {
+                if ($prop.Name -ne 'PSComputerName') { $entry[$prop.Name] = [string]$prop.Value }
+            }
+            [PSCustomObject]$entry
+        }
+        
+        if ([System.IO.Path]::GetExtension($exportPath).ToLower() -eq ".json") {
+            ConvertTo-Json -InputObject @($exportData) -Depth 4 | Out-File -FilePath $exportPath -Encoding UTF8
+        } else {
+            $exportData | Export-Csv -Path $exportPath -NoTypeInformation -Encoding UTF8
+        }
+        
+        Write-Log "DNSSEC: public keys of zone $zoneName exported to $exportPath" -Level "INFO" -Component "DNSSEC"
+        Show-MessageBox "$($records.Count) public DNSKEY record(s) exported to:`n$exportPath`n`nPrivate keys are never exported by this tool." "DNSSEC export"
     } catch {
-        Write-Log "Error during DNSSEC key generation: $_" -Level "ERROR"
-        Show-MessageBox "Error during key generation:`n$_" "Error" "Error"
+        Write-Log "Error exporting DNSSEC keys for $zoneName`: $_" -Level "ERROR" -Component "DNSSEC"
+        Show-MessageBox "Error exporting DNSSEC keys:`n$($_.Exception.Message)" "Error" "Error"
     }
-}
-
-function Export-DNSSECKeys {
-    Show-MessageBox "DNSSEC-Schluessel-Export must be performed via the DNS console.`n`nNavigate to:`nDNS Manager -> Your Zone -> DNSSEC -> Right-click on Keys -> Export" "DNSSEC Export" "Information"
 }
 
 function Validate-DNSSECSignatures {
-    $zoneName = $global:Controls.cmbDNSSECZone.SelectedItem
+    $zoneName = Get-SelectedDNSSECZoneName
     if (-not $zoneName) {
-        Show-MessageBox "Bitte waehlen Sie eine Zone aus." "Keine Zone ausgewaehlt" "Warning"
+        Show-MessageBox "Please select a zone." "No zone selected" "Warning"
         return
     }
+    $server = $global:Controls.txtDNSServer.Text
     
     try {
-        # Einfache DNSSEC-Validierung ueber nslookup
-        $validationResult = & nslookup -type=DNSKEY $zoneName 2>&1
-        Show-MessageBox "DNSSEC validation for zone '$zoneName':`n`n$($validationResult -join "`n")" "DNSSEC Validation" "Information"
-        Write-Log "DNSSEC validation performed for zone" -Level "INFO"
+        $report = New-Object System.Text.StringBuilder
+        $null = $report.AppendLine("DNSSEC validation for zone '$zoneName' (server: $server)")
+        $null = $report.AppendLine("")
+        
+        $dnskeys = @(Resolve-DnsName -Name $zoneName -Type DNSKEY -Server $server -DnssecOk -DnsOnly -ErrorAction Stop | Where-Object { $_.QueryType -eq "DNSKEY" -or $_.Type -eq "DNSKEY" })
+        $null = $report.AppendLine("DNSKEY records: $($dnskeys.Count)")
+        
+        $soa = @(Resolve-DnsName -Name $zoneName -Type SOA -Server $server -DnssecOk -DnsOnly -ErrorAction Stop)
+        $rrsigs = @($soa | Where-Object { [string]$_.QueryType -eq "RRSIG" -or [string]$_.Type -eq "RRSIG" })
+        $null = $report.AppendLine("RRSIG records for SOA: $($rrsigs.Count)")
+        foreach ($sig in $rrsigs) {
+            $null = $report.AppendLine("  - Signer: $($sig.Signer), Algorithm: $($sig.Algorithm), Expires: $($sig.Expiration)")
+        }
+        $null = $report.AppendLine("")
+        
+        if ($dnskeys.Count -gt 0 -and $rrsigs.Count -gt 0) {
+            $null = $report.AppendLine("Result: Zone is signed and the server returns DNSSEC records.")
+        } else {
+            $null = $report.AppendLine("Result: No valid DNSSEC data returned - the zone is probably not signed.")
+        }
+        
+        Set-DNSSECStatusText "Validation completed for '$zoneName'"
+        Show-MessageBox $report.ToString() "DNSSEC Validation" "Information"
+        Write-Log "DNSSEC validation performed for zone $zoneName (DNSKEY: $($dnskeys.Count), RRSIG: $($rrsigs.Count))" -Level "INFO" -Component "DNSSEC"
         
     } catch {
-        Write-Log "Error during DNSSEC validation: $_" -Level "ERROR"
-        Show-MessageBox "Error during DNSSEC validation:`n$_" "Error" "Error"
+        Set-DNSSECStatusText "Validation failed" "#D13438"
+        Write-Log "Error during DNSSEC validation: $_" -Level "ERROR" -Component "DNSSEC"
+        Show-MessageBox "Error during DNSSEC validation:`n$($_.Exception.Message)" "Error" "Error"
     }
 }
 
 function Force-KeyRollover {
-    Show-MessageBox "Key Rollover must be performed via extended DNS management tools.`n`nUse the DNS console or specialized DNSSEC management tools." "Key Rollover" "Information"
+    $zoneName = Get-SelectedDNSSECZoneName
+    if (-not $zoneName) {
+        Show-MessageBox "Please select a zone." "No zone selected" "Warning"
+        return
+    }
+    $server = $global:Controls.txtDNSServer.Text
+    
+    try {
+        $keys = @(Get-DnsServerSigningKey -ZoneName $zoneName -ComputerName $server -ErrorAction Stop)
+        if ($keys.Count -eq 0) {
+            Show-MessageBox "Zone '$zoneName' has no DNSSEC signing keys." "No keys" "Information"
+            return
+        }
+        
+        $result = [System.Windows.MessageBox]::Show("Start an immediate key rollover for all $($keys.Count) key(s) of zone '$zoneName'?`n`nFor KSK rollovers the DS record in the parent zone must be updated!", "Force key rollover", "YesNo", "Warning")
+        if ($result -ne "Yes") { return }
+        
+        Invoke-DnsServerSigningKeyRollover -ZoneName $zoneName -KeyId ([guid[]]@($keys.KeyId)) -ComputerName $server -Force -ErrorAction Stop
+        Set-DNSSECStatusText "Key rollover started for '$zoneName'"
+        Write-Log "DNSSEC: key rollover started for zone $zoneName ($($keys.Count) keys)" -Level "INFO" -Component "DNSSEC"
+        Show-MessageBox "Key rollover was started for zone '$zoneName'." "Key Rollover"
+        Update-DNSSECStatus
+    } catch {
+        Set-DNSSECStatusText "Key rollover failed" "#D13438"
+        Write-Log "Error during key rollover for $zoneName`: $_" -Level "ERROR" -Component "DNSSEC"
+        Show-MessageBox "Error during key rollover:`n$($_.Exception.Message)" "Error" "Error"
+    }
 }
 
 function Update-DNSSECZoneInfo {
-    # Platzhalter für zonen-spezifische DNSSEC-Informationen
+    # Zeigt Kurzinfos zur ausgewaehlten Zone in der Statuszeile (nutzt den Schluessel-Cache)
+    $zoneName = [string]$global:Controls.cmbDNSSECZone.SelectedItem
+    if ([string]::IsNullOrEmpty($zoneName)) { return }
+    
+    if ($global:DNSSECKeyCache.ContainsKey($zoneName)) {
+        $keys = @($global:DNSSECKeyCache[$zoneName])
+        $ksk = @($keys | Where-Object { [string]$_.KeyType -eq "KeySigningKey" }).Count
+        $zsk = @($keys | Where-Object { [string]$_.KeyType -eq "ZoneSigningKey" }).Count
+        Set-DNSSECStatusText "${zoneName}: signed ($ksk KSK, $zsk ZSK)"
+    } else {
+        Set-DNSSECStatusText "${zoneName}: not signed" "#605E5C"
+    }
 }
 
 ###############################################################################
@@ -6637,154 +7147,3 @@ $global:Window.Add_Closed({
 
 # Show the window
 [void]$global:Window.ShowDialog() 
-# SIG # Begin signature block
-# MIIbywYJKoZIhvcNAQcCoIIbvDCCG7gCAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAolEb8d+cfCpiL
-# RTbcQI/9WzLIOQQGd8idMbdNtPZRwKCCFhcwggMQMIIB+KADAgECAhB3jzsyX9Cg
-# jEi+sBC2rBMTMA0GCSqGSIb3DQEBCwUAMCAxHjAcBgNVBAMMFVBoaW5JVC1QU3Nj
-# cmlwdHNfU2lnbjAeFw0yNTA3MDUwODI4MTZaFw0yNzA3MDUwODM4MTZaMCAxHjAc
-# BgNVBAMMFVBoaW5JVC1QU3NjcmlwdHNfU2lnbjCCASIwDQYJKoZIhvcNAQEBBQAD
-# ggEPADCCAQoCggEBALmz3o//iDA5MvAndTjGX7/AvzTSACClfuUR9WYK0f6Ut2dI
-# mPxn+Y9pZlLjXIpZT0H2Lvxq5aSI+aYeFtuJ8/0lULYNCVT31Bf+HxervRBKsUyi
-# W9+4PH6STxo3Pl4l56UNQMcWLPNjDORWRPWHn0f99iNtjI+L4tUC/LoWSs3obzxN
-# 3uTypzlaPBxis2qFSTR5SWqFdZdRkcuI5LNsJjyc/QWdTYRrfmVqp0QrvcxzCv8u
-# EiVuni6jkXfiE6wz+oeI3L2iR+ywmU6CUX4tPWoS9VTtmm7AhEpasRTmrrnSg20Q
-# jiBa1eH5TyLAH3TcYMxhfMbN9a2xDX5pzM65EJUCAwEAAaNGMEQwDgYDVR0PAQH/
-# BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQO7XOqiE/EYi+n
-# IaR6YO5M2MUuVTANBgkqhkiG9w0BAQsFAAOCAQEAjYOKIwBu1pfbdvEFFaR/uY88
-# peKPk0NnvNEc3dpGdOv+Fsgbz27JPvItITFd6AKMoN1W48YjQLaU22M2jdhjGN5i
-# FSobznP5KgQCDkRsuoDKiIOTiKAAknjhoBaCCEZGw8SZgKJtWzbST36Thsdd/won
-# ihLsuoLxfcFnmBfrXh3rTIvTwvfujob68s0Sf5derHP/F+nphTymlg+y4VTEAijk
-# g2dhy8RAsbS2JYZT7K5aEJpPXMiOLBqd7oTGfM7y5sLk2LIM4cT8hzgz3v5yPMkF
-# H2MdR//K403e1EKH9MsGuGAJZddVN8ppaiESoPLoXrgnw2SY5KCmhYw1xRFdjTCC
-# BY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJKoZIhvcNAQEMBQAwZTEL
-# MAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3
-# LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJRCBSb290
-# IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1OVowYjELMAkGA1UEBhMC
-# VVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0
-# LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290IEc0MIICIjANBgkq
-# hkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAv+aQc2jeu+RdSjwwIjBpM+zCpyUuySE9
-# 8orYWcLhKac9WKt2ms2uexuEDcQwH/MbpDgW61bGl20dq7J58soR0uRf1gU8Ug9S
-# H8aeFaV+vp+pVxZZVXKvaJNwwrK6dZlqczKU0RBEEC7fgvMHhOZ0O21x4i0MG+4g
-# 1ckgHWMpLc7sXk7Ik/ghYZs06wXGXuxbGrzryc/NrDRAX7F6Zu53yEioZldXn1RY
-# jgwrt0+nMNlW7sp7XeOtyU9e5TXnMcvak17cjo+A2raRmECQecN4x7axxLVqGDgD
-# EI3Y1DekLgV9iPWCPhCRcKtVgkEy19sEcypukQF8IUzUvK4bA3VdeGbZOjFEmjNA
-# vwjXWkmkwuapoGfdpCe8oU85tRFYF/ckXEaPZPfBaYh2mHY9WV1CdoeJl2l6SPDg
-# ohIbZpp0yt5LHucOY67m1O+SkjqePdwA5EUlibaaRBkrfsCUtNJhbesz2cXfSwQA
-# zH0clcOP9yGyshG3u3/y1YxwLEFgqrFjGESVGnZifvaAsPvoZKYz0YkH4b235kOk
-# GLimdwHhD5QMIR2yVCkliWzlDlJRR3S+Jqy2QXXeeqxfjT/JvNNBERJb5RBQ6zHF
-# ynIWIgnffEx1P2PsIV/EIFFrb7GrhotPwtZFX50g/KEexcCPorF+CiaZ9eRpL5gd
-# LfXZqbId5RsCAwEAAaOCATowggE2MA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYE
-# FOzX44LScV1kTN8uZz/nupiuHA9PMB8GA1UdIwQYMBaAFEXroq/0ksuCMS1Ri6en
-# IZ3zbcgPMA4GA1UdDwEB/wQEAwIBhjB5BggrBgEFBQcBAQRtMGswJAYIKwYBBQUH
-# MAGGGGh0dHA6Ly9vY3NwLmRpZ2ljZXJ0LmNvbTBDBggrBgEFBQcwAoY3aHR0cDov
-# L2NhY2VydHMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENBLmNy
-# dDBFBgNVHR8EPjA8MDqgOKA2hjRodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGln
-# aUNlcnRBc3N1cmVkSURSb290Q0EuY3JsMBEGA1UdIAQKMAgwBgYEVR0gADANBgkq
-# hkiG9w0BAQwFAAOCAQEAcKC/Q1xV5zhfoKN0Gz22Ftf3v1cHvZqsoYcs7IVeqRq7
-# IviHGmlUIu2kiHdtvRoU9BNKei8ttzjv9P+Aufih9/Jy3iS8UgPITtAq3votVs/5
-# 9PesMHqai7Je1M/RQ0SbQyHrlnKhSLSZy51PpwYDE3cnRNTnf+hZqPC/Lwum6fI0
-# POz3A8eHqNJMQBk1RmppVLC4oVaO7KTVPeix3P0c2PR3WlxUjG/voVA9/HYJaISf
-# b8rbII01YBwCA8sgsKxYoA5AY8WYIsGyWfVVa88nq2x2zm8jLfR+cWojayL/ErhU
-# LSd+2DrZ8LaHlv1b0VysGMNNn3O3AamfV6peKOK5lDCCBq4wggSWoAMCAQICEAc2
-# N7ckVHzYR6z9KGYqXlswDQYJKoZIhvcNAQELBQAwYjELMAkGA1UEBhMCVVMxFTAT
-# BgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEh
-# MB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290IEc0MB4XDTIyMDMyMzAwMDAw
-# MFoXDTM3MDMyMjIzNTk1OVowYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lD
-# ZXJ0LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYg
-# U0hBMjU2IFRpbWVTdGFtcGluZyBDQTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCC
-# AgoCggIBAMaGNQZJs8E9cklRVcclA8TykTepl1Gh1tKD0Z5Mom2gsMyD+Vr2EaFE
-# FUJfpIjzaPp985yJC3+dH54PMx9QEwsmc5Zt+FeoAn39Q7SE2hHxc7Gz7iuAhIoi
-# GN/r2j3EF3+rGSs+QtxnjupRPfDWVtTnKC3r07G1decfBmWNlCnT2exp39mQh0YA
-# e9tEQYncfGpXevA3eZ9drMvohGS0UvJ2R/dhgxndX7RUCyFobjchu0CsX7LeSn3O
-# 9TkSZ+8OpWNs5KbFHc02DVzV5huowWR0QKfAcsW6Th+xtVhNef7Xj3OTrCw54qVI
-# 1vCwMROpVymWJy71h6aPTnYVVSZwmCZ/oBpHIEPjQ2OAe3VuJyWQmDo4EbP29p7m
-# O1vsgd4iFNmCKseSv6De4z6ic/rnH1pslPJSlRErWHRAKKtzQ87fSqEcazjFKfPK
-# qpZzQmiftkaznTqj1QPgv/CiPMpC3BhIfxQ0z9JMq++bPf4OuGQq+nUoJEHtQr8F
-# nGZJUlD0UfM2SU2LINIsVzV5K6jzRWC8I41Y99xh3pP+OcD5sjClTNfpmEpYPtMD
-# iP6zj9NeS3YSUZPJjAw7W4oiqMEmCPkUEBIDfV8ju2TjY+Cm4T72wnSyPx4Jduyr
-# XUZ14mCjWAkBKAAOhFTuzuldyF4wEr1GnrXTdrnSDmuZDNIztM2xAgMBAAGjggFd
-# MIIBWTASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBS6FtltTYUvcyl2mi91
-# jGogj57IbzAfBgNVHSMEGDAWgBTs1+OC0nFdZEzfLmc/57qYrhwPTzAOBgNVHQ8B
-# Af8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwgwdwYIKwYBBQUHAQEEazBpMCQG
-# CCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQQYIKwYBBQUHMAKG
-# NWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290
-# RzQuY3J0MEMGA1UdHwQ8MDowOKA2oDSGMmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNv
-# bS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3JsMCAGA1UdIAQZMBcwCAYGZ4EMAQQC
-# MAsGCWCGSAGG/WwHATANBgkqhkiG9w0BAQsFAAOCAgEAfVmOwJO2b5ipRCIBfmbW
-# 2CFC4bAYLhBNE88wU86/GPvHUF3iSyn7cIoNqilp/GnBzx0H6T5gyNgL5Vxb122H
-# +oQgJTQxZ822EpZvxFBMYh0MCIKoFr2pVs8Vc40BIiXOlWk/R3f7cnQU1/+rT4os
-# equFzUNf7WC2qk+RZp4snuCKrOX9jLxkJodskr2dfNBwCnzvqLx1T7pa96kQsl3p
-# /yhUifDVinF2ZdrM8HKjI/rAJ4JErpknG6skHibBt94q6/aesXmZgaNWhqsKRcnf
-# xI2g55j7+6adcq/Ex8HBanHZxhOACcS2n82HhyS7T6NJuXdmkfFynOlLAlKnN36T
-# U6w7HQhJD5TNOXrd/yVjmScsPT9rp/Fmw0HNT7ZAmyEhQNC3EyTN3B14OuSereU0
-# cZLXJmvkOHOrpgFPvT87eK1MrfvElXvtCl8zOYdBeHo46Zzh3SP9HSjTx/no8Zhf
-# +yvYfvJGnXUsHicsJttvFXseGYs2uJPU5vIXmVnKcPA3v5gA3yAWTyf7YGcWoWa6
-# 3VXAOimGsJigK+2VQbc61RWYMbRiCQ8KvYHZE/6/pNHzV9m8BPqC3jLfBInwAM1d
-# wvnQI38AC+R2AibZ8GV2QqYphwlHK+Z/GqSFD/yYlvZVVCsfgPrA8g4r5db7qS9E
-# FUrnEw4d2zc4GqEr9u3WfPwwgga8MIIEpKADAgECAhALrma8Wrp/lYfG+ekE4zME
-# MA0GCSqGSIb3DQEBCwUAMGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2Vy
-# dCwgSW5jLjE7MDkGA1UEAxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNI
-# QTI1NiBUaW1lU3RhbXBpbmcgQ0EwHhcNMjQwOTI2MDAwMDAwWhcNMzUxMTI1MjM1
-# OTU5WjBCMQswCQYDVQQGEwJVUzERMA8GA1UEChMIRGlnaUNlcnQxIDAeBgNVBAMT
-# F0RpZ2lDZXJ0IFRpbWVzdGFtcCAyMDI0MIICIjANBgkqhkiG9w0BAQEFAAOCAg8A
-# MIICCgKCAgEAvmpzn/aVIauWMLpbbeZZo7Xo/ZEfGMSIO2qZ46XB/QowIEMSvgjE
-# dEZ3v4vrrTHleW1JWGErrjOL0J4L0HqVR1czSzvUQ5xF7z4IQmn7dHY7yijvoQ7u
-# jm0u6yXF2v1CrzZopykD07/9fpAT4BxpT9vJoJqAsP8YuhRvflJ9YeHjes4fduks
-# THulntq9WelRWY++TFPxzZrbILRYynyEy7rS1lHQKFpXvo2GePfsMRhNf1F41nyE
-# g5h7iOXv+vjX0K8RhUisfqw3TTLHj1uhS66YX2LZPxS4oaf33rp9HlfqSBePejlY
-# eEdU740GKQM7SaVSH3TbBL8R6HwX9QVpGnXPlKdE4fBIn5BBFnV+KwPxRNUNK6lY
-# k2y1WSKour4hJN0SMkoaNV8hyyADiX1xuTxKaXN12HgR+8WulU2d6zhzXomJ2Ple
-# I9V2yfmfXSPGYanGgxzqI+ShoOGLomMd3mJt92nm7Mheng/TBeSA2z4I78JpwGpT
-# RHiT7yHqBiV2ngUIyCtd0pZ8zg3S7bk4QC4RrcnKJ3FbjyPAGogmoiZ33c1HG93V
-# p6lJ415ERcC7bFQMRbxqrMVANiav1k425zYyFMyLNyE1QulQSgDpW9rtvVcIH7Wv
-# G9sqYup9j8z9J1XqbBZPJ5XLln8mS8wWmdDLnBHXgYly/p1DhoQo5fkCAwEAAaOC
-# AYswggGHMA4GA1UdDwEB/wQEAwIHgDAMBgNVHRMBAf8EAjAAMBYGA1UdJQEB/wQM
-# MAoGCCsGAQUFBwMIMCAGA1UdIAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwHATAf
-# BgNVHSMEGDAWgBS6FtltTYUvcyl2mi91jGogj57IbzAdBgNVHQ4EFgQUn1csA3cO
-# KBWQZqVjXu5Pkh92oFswWgYDVR0fBFMwUTBPoE2gS4ZJaHR0cDovL2NybDMuZGln
-# aWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0UlNBNDA5NlNIQTI1NlRpbWVTdGFt
-# cGluZ0NBLmNybDCBkAYIKwYBBQUHAQEEgYMwgYAwJAYIKwYBBQUHMAGGGGh0dHA6
-# Ly9vY3NwLmRpZ2ljZXJ0LmNvbTBYBggrBgEFBQcwAoZMaHR0cDovL2NhY2VydHMu
-# ZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0UlNBNDA5NlNIQTI1NlRpbWVT
-# dGFtcGluZ0NBLmNydDANBgkqhkiG9w0BAQsFAAOCAgEAPa0eH3aZW+M4hBJH2UOR
-# 9hHbm04IHdEoT8/T3HuBSyZeq3jSi5GXeWP7xCKhVireKCnCs+8GZl2uVYFvQe+p
-# PTScVJeCZSsMo1JCoZN2mMew/L4tpqVNbSpWO9QGFwfMEy60HofN6V51sMLMXNTL
-# fhVqs+e8haupWiArSozyAmGH/6oMQAh078qRh6wvJNU6gnh5OruCP1QUAvVSu4kq
-# VOcJVozZR5RRb/zPd++PGE3qF1P3xWvYViUJLsxtvge/mzA75oBfFZSbdakHJe2B
-# VDGIGVNVjOp8sNt70+kEoMF+T6tptMUNlehSR7vM+C13v9+9ZOUKzfRUAYSyyEmY
-# tsnpltD/GWX8eM70ls1V6QG/ZOB6b6Yum1HvIiulqJ1Elesj5TMHq8CWT/xrW7tw
-# ipXTJ5/i5pkU5E16RSBAdOp12aw8IQhhA/vEbFkEiF2abhuFixUDobZaA0VhqAsM
-# HOmaT3XThZDNi5U2zHKhUs5uHHdG6BoQau75KiNbh0c+hatSF+02kULkftARjsyE
-# pHKsF7u5zKRbt5oK5YGwFvgc4pEVUNytmB3BpIiowOIIuDgP5M9WArHYSAR16gc0
-# dP2XdkMEP5eBsX7bf/MGN4K3HP50v/01ZHo/Z5lGLvNwQ7XHBx1yomzLP8lx4Q1z
-# ZKDyHcp4VQJLu2kWTsKsOqQxggUKMIIFBgIBATA0MCAxHjAcBgNVBAMMFVBoaW5J
-# VC1QU3NjcmlwdHNfU2lnbgIQd487Ml/QoIxIvrAQtqwTEzANBglghkgBZQMEAgEF
-# AKCBhDAYBgorBgEEAYI3AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgor
-# BgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3
-# DQEJBDEiBCC4FuJy9sVFJk+IeKwKitXXerVjjL+JLEZQfDnWoXa7QjANBgkqhkiG
-# 9w0BAQEFAASCAQCtA2txFqDqWb8nhWrjbYmRFxcLQK2rRroW0pVONjzGSdhEnIY4
-# C/uoJV0mIXyrsRfpH+dAyi86p2BebvKKx5oogiI4wyairnOGjf7pViBJM/zgyGTn
-# cCe43x66AwTyPC+7YRL/pB70Oe8c/49uMP1oDYJoKuPmnWlKCAVHVBbRoPLEoL61
-# h0+nEWfQ6wwkvYp41Jskl83R0CJwC5GiGAIfC4AGbUkVcT04CAh17J17O125LuBU
-# pZwyOr4Y7tQ/znTrWqsYW8BzN1kI6dGTDupbmM0ChTttzBh9xCqdNQrvDk37MNnj
-# 8Y2JpCmkQQb75GPl2dI//KmM/mwzyg4va2URoYIDIDCCAxwGCSqGSIb3DQEJBjGC
-# Aw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJ
-# bmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hBMjU2
-# IFRpbWVTdGFtcGluZyBDQQIQC65mvFq6f5WHxvnpBOMzBDANBglghkgBZQMEAgEF
-# AKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI1
-# MDcwNTExMTkwOFowLwYJKoZIhvcNAQkEMSIEIAjKwbjVvN0ESHtCiT73NjPjqY/J
-# HSgH5ob+laLyx61hMA0GCSqGSIb3DQEBAQUABIICAIJ0p3N7KhBIBd76PKpygiIJ
-# 7sRrw3z1v25uEZlkS0WkvZdZI+JTBaLIMA0P4QUghxEh6Vv7aW5DZQ5Q5WeV1RN5
-# 2Bg9jaDVdk59YW/BL78XQbrcuYRCfYp1P+MCW+8s1TRu9Uu6AF5nYWBAgj19EHoz
-# AMMtq5fKofWCdbAFvHqLAkTNajG4PcmHnuDZV1BJgBSLFBimbinY4+udcVh8M5d/
-# xWAOLY3gV75lATwDMCamXb5w7JNCt/YXBeHA4ZHSZdzxYSnF+cjArH2E9hf04HQK
-# Iiv/Mn9PP/noNbSYZXmmErIAXqqPIJRSosK2DCIvc2izMY2zoCstaz4tmmTBmcWe
-# DV9385edMw1cABeRCV7RAgu7mNcFThwrL5xs7/Mnwc4c75kCLGOdXMUsd72Ipjeq
-# XlSl5+GmIXHIeHjKWXQTIqBeJ5g8HdNH31eVF5OWbOdzShg426xq45WwW07TtQ8l
-# RHsQisQXzJ418Td5a3WKCfFVwHW7tBl2AIShuAEHoExPXlSazXhigkq+ATu9VkQN
-# VXDKpuwvoG2mt4jsJwQ8KXFI5Nl+d1DbJIInGCIXcuXEkigwIpwLIn5ia4V+6OW/
-# HV7+BMzDCrrE7pmDhwmBhqyGzHLSYX1hIbzulL+ofdR+0DJrCf6y3zNOV0uOpCOt
-# E6z43b+C4fdBmcwlrU9T
-# SIG # End signature block
