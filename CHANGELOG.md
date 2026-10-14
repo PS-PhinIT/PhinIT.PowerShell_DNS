@@ -20,7 +20,8 @@ Audit release. Full report: [docs/AUDIT.md](docs/AUDIT.md).
 - Input validation for server names, zone names, record names, IP addresses, network IDs/prefixes and forwarder IPs before any cmdlet is called.
 - `Write-Log` strips CR/LF from messages (log injection).
 - Footer website link only opens `https://` URLs.
-- Import: 100 MB file size limit, `-LiteralPath`, per-record validation and a warning before importing XML (Clixml) files.
+- Import: 100 MB file size limit, `-LiteralPath`, per-record validation.
+- XML import/export no longer uses `Import-Clixml`/`Export-Clixml` (deserialization of arbitrary objects). New built-in functions `Export-SafeXml`/`Import-SafeXml` in the same script: plain XML, DTDs prohibited, no external resolver, text values only. XML exports of older versions remain importable. Event log XML export uses the same format.
 - `dnscmd.exe` is only called with a validated zone name; the exit code is checked.
 - DNSSEC key length 1024 bit removed (3072 bit added); ECDSA P-384 added.
 - Event log search escapes wildcard characters.

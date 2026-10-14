@@ -18,7 +18,7 @@ PowerShell-basiertes Verwaltungstool für die Windows-DNS-Server-Rolle mit WPF-O
 | Forward zones | List, create (AD forest / AD domain / legacy / file), delete |
 | Reverse zones | IPv4 /8, /16, /24 reverse zones, create, delete |
 | DNS records | A, AAAA, CNAME, MX, PTR, TXT, SRV – create, filter, delete exactly the selected record |
-| Import / Export | CSV, JSON, XML (Clixml); forward/reverse/DNSSEC selection; missing zones are created on import |
+| Import / Export | CSV, JSON, XML; forward/reverse/DNSSEC selection; missing zones are created on import |
 | DNSSEC | Sign/unsign zones, generate KSK/ZSK (RSA/SHA-256, RSA/SHA-512, ECDSA P-256/P-384), export DNSKEY, validate, force rollover |
 | Diagnostics | Ping, nslookup, resolve test, connection test, cache, service control (also remote), server configuration, forwarders, zone refresh/transfer, event logs, debug logging |
 | Advanced tools | DNS benchmark, latency test, leak test, traceroute, health report |
@@ -102,7 +102,7 @@ Configuration is inline at the top of `src/easyDNS.ps1` (`$global:AppConfig`):
 
 ## Known limitations / Bekannte Einschränkungen
 
-- XML import uses `Import-Clixml`. Only import XML files you created yourself (see [SECURITY.md](SECURITY.md)).
+- XML import/export uses a built-in safe XML format (no `Import-Clixml`, no DTDs). XML exports of older versions (Clixml) can still be imported.
 - Tested with the PowerShell parser, PSScriptAnalyzer and XAML checks; functional tests require a Windows DNS server.
 - No license file is included in the repository.
 

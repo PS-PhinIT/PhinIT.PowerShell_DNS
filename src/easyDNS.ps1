@@ -814,6 +814,111 @@ function Get-DNSStatistics {
     return $stats
 }
 
+function Export-SafeXml {
+    # Schreibt Objekte als einfaches XML (nur Text-Werte, keine Typinformationen) - Ersatz fuer Export-Clixml
+    param(
+        [object[]]$InputObject,
+        [string]$Path,
+        [string]$RootName = "DnsExport",
+        [string]$ItemName = "Record"
+    )
+    
+    $settings = New-Object System.Xml.XmlWriterSettings
+    $settings.Indent = $true
+    $settings.Encoding = New-Object System.Text.UTF8Encoding($true)
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $writer = [System.Xml.XmlWriter]::Create($fullPath, $settings)
+    try {
+        $writer.WriteStartDocument()
+        $writer.WriteStartElement($RootName)
+        $writer.WriteAttributeString("Version", "1")
+        $writer.WriteAttributeString("Application", "$($global:AppConfig.AppName) $($global:AppConfig.ScriptVersion)")
+        $writer.WriteAttributeString("Created", (Get-Date).ToString("o"))
+        foreach ($item in @($InputObject)) {
+            if ($null -eq $item) { continue }
+            $writer.WriteStartElement($ItemName)
+            foreach ($prop in $item.PSObject.Properties) {
+                $value = $prop.Value
+                $text = if ($null -eq $value) { "" }
+                        elseif ($value -is [DateTime]) { $value.ToString("o") }
+                        else { [string]$value }
+                # In XML 1.0 unzulaessige Steuerzeichen entfernen (z.B. in Ereignistexten)
+                $text = $text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+                $writer.WriteElementString([System.Xml.XmlConvert]::EncodeLocalName($prop.Name), $text)
+            }
+            $writer.WriteEndElement()
+        }
+        $writer.WriteEndElement()
+        $writer.WriteEndDocument()
+    } finally {
+        $writer.Close()
+    }
+}
+
+function Import-SafeXml {
+    # Liest easyDNS-XML-Exporte ohne Deserialisierung (Ersatz fuer Import-Clixml).
+    # DTDs/externe Entitaeten sind verboten; es werden ausschliesslich Text-Werte gelesen und keine .NET-Typen erzeugt.
+    # Unterstuetzt das neue Format (<DnsExport><Record>...) und aeltere Clixml-Exporte (<Objs><Obj><MS>...).
+    param([string]$Path)
+    
+    $settings = New-Object System.Xml.XmlReaderSettings
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $settings.IgnoreComments = $true
+    $settings.IgnoreProcessingInstructions = $true
+    
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.XmlResolver = $null
+    $stream = [System.IO.File]::OpenRead($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+    try {
+        $reader = [System.Xml.XmlReader]::Create($stream, $settings)
+        $doc.Load($reader)
+        $reader.Close()
+    } finally {
+        $stream.Dispose()
+    }
+    
+    $root = $doc.DocumentElement
+    if ($null -eq $root) { throw "The XML file is empty." }
+    
+    $result = New-Object System.Collections.Generic.List[object]
+    switch ($root.LocalName) {
+        "DnsExport" {
+            foreach ($node in $root.ChildNodes) {
+                if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element -or $node.LocalName -ne "Record") { continue }
+                $props = [ordered]@{}
+                foreach ($field in $node.ChildNodes) {
+                    if ($field.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+                    $props[[System.Xml.XmlConvert]::DecodeName($field.LocalName)] = $field.InnerText
+                }
+                $result.Add([PSCustomObject]$props)
+            }
+        }
+        "Objs" {
+            # Altes Clixml-Format: nur die benannten Eigenschaften (Attribut N) als Text uebernehmen
+            foreach ($node in $root.ChildNodes) {
+                if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element -or $node.LocalName -ne "Obj") { continue }
+                $props = [ordered]@{}
+                foreach ($container in $node.ChildNodes) {
+                    if ($container.NodeType -ne [System.Xml.XmlNodeType]::Element -or $container.LocalName -notin @("MS", "Props")) { continue }
+                    foreach ($field in $container.ChildNodes) {
+                        if ($field.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+                        $name = $field.GetAttribute("N")
+                        if ([string]::IsNullOrEmpty($name)) { continue }
+                        $props[$name] = if ($field.LocalName -eq "Nil") { $null } else { $field.InnerText }
+                    }
+                }
+                if ($props.Count -gt 0) { $result.Add([PSCustomObject]$props) }
+            }
+        }
+        default {
+            throw "Unknown XML format (root element '$($root.LocalName)'). Expected an easyDNS export."
+        }
+    }
+    
+    return ,$result.ToArray()
+}
+
 function Export-DNSConfiguration {
     param(
         [string]$DnsServerName,
@@ -860,7 +965,7 @@ function Export-DNSConfiguration {
                 $exportData | Export-Csv -Path $ExportPath -NoTypeInformation -Encoding UTF8
             }
             "XML" {
-                $exportData | Export-Clixml -Path $ExportPath
+                Export-SafeXml -InputObject $exportData.ToArray() -Path $ExportPath
             }
             "JSON" {
                 ConvertTo-Json -InputObject $exportData.ToArray() -Depth 5 | Out-File -FilePath $ExportPath -Encoding UTF8
@@ -935,7 +1040,7 @@ function Import-DNSConfiguration {
                 $importData = Import-Csv -LiteralPath $ImportPath -Encoding UTF8
             }
             "XML" {
-                $importData = Import-Clixml -LiteralPath $ImportPath
+                $importData = Import-SafeXml -Path $fileInfo.FullName
             }
             "JSON" {
                 $importData = Get-Content -LiteralPath $ImportPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -4280,9 +4385,6 @@ function Import-DNSData {
     
     $overwrite = [bool]$global:Controls.chkOverwriteExisting.IsChecked
     $overwriteText = if ($overwrite) { "Existing records with the same name and type WILL BE REPLACED!" } else { "Existing records with the same name and type will be skipped." }
-    if ($format -eq "XML") {
-        $overwriteText += "`n`nNote: XML (Clixml) files are deserialized - only import files from trusted sources."
-    }
     $result = [System.Windows.MessageBox]::Show("Do you want to import the DNS configuration from the file?`n`nFile: $importPath`nFormat: $format`n`n$overwriteText", "Confirm import", "YesNo", "Question")
     
     if ($result -eq "Yes") {
@@ -6760,7 +6862,7 @@ function Export-EventLogs {
         # Export
         $extension = [System.IO.Path]::GetExtension($exportPath).ToLower()
         if ($extension -eq ".xml") {
-            $allEvents | Export-Clixml -Path $exportPath
+            Export-SafeXml -InputObject @($allEvents) -Path $exportPath -RootName "DnsEventExport" -ItemName "Event"
         } else {
             $allEvents | Export-Csv -Path $exportPath -NoTypeInformation -Encoding UTF8
         }

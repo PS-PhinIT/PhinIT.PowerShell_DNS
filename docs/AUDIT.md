@@ -13,7 +13,7 @@ Status: ✅ behoben · ⚠️ dokumentiertes Restrisiko
 | S1 | Server-, Zonen-, Record-Namen und IPs wurden ungeprüft an DnsServer-Cmdlets und `dnscmd.exe` übergeben | Hoch | ✅ `Test-DnsServerName`, `Test-DnsName`, `Test-RecordName`, `TryParse` für IPs; `dnscmd` nur mit validiertem Zonennamen + Exit-Code-Prüfung |
 | S2 | Log-Injection: Zeilenumbrüche in Meldungen erzeugten gefälschte Logzeilen | Mittel | ✅ `Write-Log` entfernt CR/LF |
 | S3 | Import ohne Größenlimit, ohne Validierung je Datensatz | Mittel | ✅ 100-MB-Limit, `-LiteralPath`, Validierung, Zähler für übersprungene/fehlerhafte Datensätze |
-| S4 | XML-Import über `Import-Clixml` deserialisiert beliebige Objekte | Mittel | ⚠️ Warnung im Import-Dialog, Hinweis in SECURITY.md; CSV/JSON empfohlen |
+| S4 | XML-Import über `Import-Clixml` deserialisiert beliebige Objekte | Mittel | ✅ Eigener XML-Parser im selben Skript (`Import-SafeXml`/`Export-SafeXml`): DTD verboten, kein Resolver, nur Textwerte; alte Clixml-Exporte bleiben lesbar |
 | S5 | DNSSEC bot 1024-Bit-RSA an | Mittel | ✅ entfernt, 3072 Bit und ECDSA P-384 ergänzt |
 | S6 | Ereignis-Suche: Wildcards aus Benutzereingabe nicht maskiert | Niedrig | ✅ `[WildcardPattern]::Escape` |
 | S7 | Website-Link öffnete beliebige URL | Niedrig | ✅ nur `https://` |
