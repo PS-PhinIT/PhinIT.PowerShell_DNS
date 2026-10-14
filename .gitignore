@@ -1,2 +1,11 @@
-/Export
-/Logs
+# Laufzeitverzeichnisse von easyDNS (werden neben dem Skript angelegt)
+Logs/
+Export/
+Import/
+Temp/
+
+# Editor / OS
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
