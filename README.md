@@ -1,213 +1,113 @@
-# easyDNS v0.2.27 - DNS Server Management Tool
+# easyDNS v0.3.0 – DNS Server Management Tool
 
-## Overview (English)
+PowerShell-based management tool for the Windows DNS Server role with a Windows 11 style WPF interface.
+PowerShell-basiertes Verwaltungstool für die Windows-DNS-Server-Rolle mit WPF-Oberfläche im Windows-11-Stil.
 
-easyDNS v0.2.27 is a PowerShell-based DNS server management tool featuring a modern Windows 11-style WPF interface. 
-
-### Key Features
-
-- **Modern WPF Interface**: Windows 11-inspired design with responsive layout and intuitive navigation
-- **Comprehensive Zone Management**: Create, manage, and monitor both forward and reverse DNS zones
-- **Advanced DNS Records**: Support for A, AAAA, CNAME, MX, PTR, TXT, SRV, NS, SOA records with validation
-- **DNSSEC Management**: Complete DNSSEC implementation with key management and validation
-- **Import/Export**: Flexible data exchange in CSV, XML, and JSON formats
-- **Real-time Monitoring**: Live DNS query monitoring with performance metrics and analytics
-- **Diagnostic Tools**: Comprehensive troubleshooting suite including ping, nslookup, traceroute, and DNS benchmarking
-- **Audit & Logging**: Detailed logging system with event tracking and export capabilities
-- **Auto-Detection**: Automatic detection and connection to local DNS servers
-- **Performance Analytics**: Response time analysis, throughput monitoring, and health reporting
+- **Changelog:** [CHANGELOG.md](CHANGELOG.md)
+- **Audit report / Audit-Bericht:** [docs/AUDIT.md](docs/AUDIT.md)
+- **Security / Sicherheit:** [SECURITY.md](SECURITY.md)
+- **Contributing / Mitwirken:** [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
-## Übersicht (Deutsch)
+## Features
 
-easyDNS v0.2.27 ist ein PowerShell-basiertes DNS-Server-Verwaltungstool mit einer modernen Windows 11-Style WPF-Oberfläche.
+| Area | Functions |
+|------|-----------|
+| Dashboard | OS, user, DNS service, CPU, RAM, disk and uptime of the connected server; zone/record statistics |
+| Forward zones | List, create (AD forest / AD domain / legacy / file), delete |
+| Reverse zones | IPv4 /8, /16, /24 reverse zones, create, delete |
+| DNS records | A, AAAA, CNAME, MX, PTR, TXT, SRV – create, filter, delete exactly the selected record |
+| Import / Export | CSV, JSON, XML (Clixml); forward/reverse/DNSSEC selection; missing zones are created on import |
+| DNSSEC | Sign/unsign zones, generate KSK/ZSK (RSA/SHA-256, RSA/SHA-512, ECDSA P-256/P-384), export DNSKEY, validate, force rollover |
+| Diagnostics | Ping, nslookup, resolve test, connection test, cache, service control (also remote), server configuration, forwarders, zone refresh/transfer, event logs, debug logging |
+| Advanced tools | DNS benchmark, latency test, leak test, traceroute, health report |
+| Monitoring | Query/error/security monitoring from counters and event logs, real-time monitor, top queries (DNS debug log), response time and throughput analysis |
+| Audit & logs | Event list with filter/search, export |
 
-### Hauptfunktionen
+## Requirements / Voraussetzungen
 
-- **Moderne WPF-Oberfläche**: Windows 11-inspiriertes Design mit responsivem Layout und intuitiver Navigation
-- **Umfassende Zonenverwaltung**: Erstellen, verwalten und überwachen von Forward- und Reverse-DNS-Zonen
-- **Erweiterte DNS-Einträge**: Unterstützung für A, AAAA, CNAME, MX, PTR, TXT, SRV, NS, SOA-Einträge mit Validierung
-- **DNSSEC-Verwaltung**: Vollständige DNSSEC-Implementierung mit Schlüsselverwaltung und Validierung
-- **Import/Export**: Flexibler Datenaustausch in CSV-, XML- und JSON-Formaten
-- **Echtzeit-Überwachung**: Live-DNS-Abfrage-Überwachung mit Leistungsmetriken und Analysen
-- **Diagnose-Tools**: Umfassende Fehlerbehebungs-Suite mit Ping, Nslookup, Traceroute und DNS-Benchmarking
-- **Audit & Protokollierung**: Detailliertes Protokollierungssystem mit Ereignisverfolgung und Exportfunktionen
-- **Auto-Erkennung**: Automatische Erkennung und Verbindung zu lokalen DNS-Servern
-- **Leistungsanalysen**: Antwortzeit-Analyse, Durchsatz-Überwachung und Gesundheitsberichte
+- Windows 10/11 or Windows Server 2016 – 2025
+- Windows PowerShell 5.1 or PowerShell 7.x (Windows), STA mode (default)
+- Module `DnsServer` (RSAT DNS tools or DNS Server role)
+- Administrator rights (the script uses `#requires -RunAsAdministrator`)
+- For remote servers: RPC/WinRM/CIM access and DNS admin permissions on the target
 
----
+## Repository structure / Ordnerstruktur
 
-## Changelog
+```
+.
+├── src/
+│   └── easyDNS.ps1          # application (single file)
+├── docs/
+│   └── AUDIT.md             # audit report 0.3.0
+├── assets/
+│   └── screenshots/         # place for current screenshots
+├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+└── README.md
+```
 
-### Version 0.2.27 (Latest - 26.05.2025)
-- **Complete WPF Rewrite**: Modern Windows 11-style interface with improved user experience
-- **Enhanced Navigation**: Streamlined panel-based navigation system with 8 main sections
-- **Real-time Monitoring**: Live DNS query monitoring with performance analytics and pattern analysis
-- **Advanced Diagnostics**: Comprehensive diagnostic tools including DNS benchmarking, leak testing, and traceroute analysis
-- **Improved DNSSEC**: Enhanced DNSSEC management with key generation, validation, and rollover support
-- **Auto-Detection**: Automatic detection of local DNS server roles with smart connection handling
-- **Performance Metrics**: Response time analysis, throughput monitoring, and comprehensive health reporting
-- **Enhanced Logging**: Advanced logging system with filtering, export capabilities, and rotation
-- **Modern UI Components**: Windows 11-inspired design elements, responsive layout, and dark navigation
-- **Inline Configuration**: No external INI file required - all configuration embedded in script
-- **Import/Export**: Flexible data exchange in CSV, XML, and JSON formats with validation
-- **Audit & Event Tracking**: Complete audit trail with event log integration and monitoring
+At runtime the folders `Logs/`, `Export/`, `Import/` and `Temp/` are created next to the script (`src/`). They are excluded via `.gitignore`.
 
-### Version 0.1.11 (11.05.2025)
-- **Enhanced WPF Interface**: Improved Windows 11-style design with better responsiveness
-- **Performance Monitoring**: Added performance counters and connection status caching
-- **Advanced Logging**: Extended logging with component-based categorization and log rotation
-- **Auto-Refresh**: Configurable automatic refresh functionality (5-minute intervals)
-- **Connection Management**: Smart DNS server detection with auto-connect for local servers
-- **Error Handling**: Robust error handling with retry mechanisms and safe operations
-- **Extended Record Support**: Support for A, AAAA, CNAME, MX, PTR, TXT, SRV, NS, SOA records
-- **Input Validation**: Enhanced input validation and sanitization
-- **Temporary Files**: Proper temporary file management and cleanup
-- **Cache Management**: Improved caching for better performance
-
-### Version 0.0.14 (21.03.2025)
-- **Initial WPF Implementation**: First version with Windows Presentation Foundation interface
-- **Basic DNS Management**: Core functionality for zone and record management
-- **Windows 11 Design**: Modern design language with Windows 11 color scheme
-- **Export/Import**: Basic CSV, XML, and JSON export/import functionality
-- **DNS Server Detection**: Automatic detection of local DNS server installations
-- **Logging System**: Basic logging with file rotation and color-coded console output
-- **Zone Management**: Forward and reverse zone creation and management
-- **Record Operations**: Basic DNS record CRUD operations
-- **Configuration Management**: Inline configuration system
-- **Error Handling**: Basic error handling and user feedback
-
-### Early Development Versions
-- **v0.0.x**: Initial development versions with basic PowerShell DNS cmdlet integration
-- **Pre-release**: Proof-of-concept versions with command-line interface
-
----
-
-## Requirements
-
-- **Operating System**: Windows 10/11 or Windows Server 2016/2019/2022
-- **PowerShell**: Version 5.1 or higher (PowerShell 7+ recommended)
-- **DNS Server Role**: Must be installed on target server
-- **Permissions**: Administrator rights required
-- **Execution Policy**: Set to RemoteSigned or Unrestricted
-- **.NET Framework**: 4.7.2 or higher (for WPF components)
-
-## Installation & Usage
-
-1. **Download**: Download the script `easyDNS_V0.2.27.ps1`
-2. **Execution Policy**: Ensure PowerShell execution policy allows script execution:
-   ```powershell
-   Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-   ```
-3. **Run as Administrator**: Execute the script with administrator privileges:
-   ```powershell
-   .\easyDNS_V0.2.27.ps1
-   ```
-4. **Auto-Connection**: The tool automatically detects local DNS server roles and connects
-5. **Manual Connection**: For remote servers, enter the server name/IP and click "Connect"
-
-## Interface Overview
-
-### Main Panels
-
-- **Dashboard**: System overview with server information and DNS statistics
-- **Forward Zones**: Management of forward lookup zones
-- **Reverse Zones**: Management of reverse lookup zones  
-- **DNS Records**: Create, edit, and delete DNS records
-- **Import/Export**: Data exchange in multiple formats
-- **DNSSEC**: DNSSEC configuration and key management
-- **Diagnostic Tools**: Comprehensive troubleshooting suite
-- **Audit and Logs**: Event monitoring and log analysis
-
-### Diagnostic Tools Features
-
-- **Quick Tools**: Ping, Nslookup, DNS resolution, connection testing
-- **Cache Management**: DNS server and client cache control
-- **Service Management**: DNS service start/stop/restart operations
-- **Configuration**: Server settings and network adapter DNS information
-- **Forwarders**: DNS forwarder configuration and management
-- **Zone Tools**: Zone-specific operations and transfers
-- **Event Logs**: DNS, system, and security event analysis
-- **Advanced Diagnostics**: DNS benchmarking, latency testing, leak detection
-- **Real-time Monitoring**: Live query monitoring with pattern analysis
-
-## Configuration
-
-The application uses inline configuration with the following key settings:
+## Installation & start / Start
 
 ```powershell
-$global:AppConfig = @{
-    AppName = "easyDNS"
-    ScriptVersion = "0.2.27"
-    AutoRefreshInterval = 300  # seconds
-    MaxLogEntries = 10000
-    DefaultTTL = 3600
-    EnableLogging = $true
-    DebugMode = $false
-}
+# Downloaded files are marked as coming from the internet – unblock first
+Unblock-File -Path .\src\easyDNS.ps1
+
+# Start from an elevated PowerShell
+powershell.exe -ExecutionPolicy Bypass -File .\src\easyDNS.ps1
 ```
+
+If a local DNS server is detected, easyDNS connects automatically. For a remote server enter the name or IP and click **Connect**.
+
+### Code signing
+
+Version 0.3.0 is **not signed** (the previous signature became invalid when the code changed). With `AllSigned` policies sign the script yourself:
+
+```powershell
+$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1
+Set-AuthenticodeSignature -FilePath .\src\easyDNS.ps1 -Certificate $cert -TimestampServer 'http://timestamp.digicert.com'
+```
+
+## Configuration / Konfiguration
+
+Configuration is inline at the top of `src/easyDNS.ps1` (`$global:AppConfig`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `AutoRefreshInterval` | `300` | Auto-refresh in seconds |
+| `MaxLogEntries` | `10000` | Max. entries in the in-memory log |
+| `DefaultTTL` | `3600` | Default TTL for new records |
+| `DebugMode` | `$false` | Additional debug logging |
 
 ## Logging
 
-- **Location**: `Logs/easyDNS_YYYYMMDD_USERNAME.log`
-- **Rotation**: Automatic rotation at 10MB
-- **Levels**: INFO, WARN, ERROR, DEBUG, SUCCESS
-- **Export**: Logs can be exported in various formats
-
-## Performance Features
-
-- **Caching**: Intelligent caching for improved responsiveness
-- **Async Operations**: Non-blocking operations for better UI experience
-- **Connection Pooling**: Efficient DNS server connection management
-- **Auto-Refresh**: Configurable automatic data refresh
-- **Performance Counters**: Built-in performance monitoring
-
-## Security Features
-
-- **Input Validation**: Comprehensive input sanitization
-- **Safe Operations**: Error handling with retry mechanisms
-- **Audit Trail**: Complete logging of all operations
-- **Permission Checks**: Automatic permission validation
+- File: `src/Logs/easyDNS_YYYYMMDD_<user>.log`
+- Levels: `DEBUG`, `INFO`, `SUCCESS`, `WARN`, `ERROR`
+- Line breaks in messages are removed (protection against log injection)
 
 ## Troubleshooting
 
-### Common Issues
+| Problem | Solution |
+|---------|----------|
+| `Get-DnsServerZone` not found | Install RSAT DNS tools / `DnsServer` module |
+| Connection failed | Check DNS service, firewall (RPC, TCP 135 + dynamic ports) and permissions |
+| Script will not start | `Unblock-File`, check execution policy, start elevated |
+| Umlauts garbled | Make sure the file is saved as UTF-8 **with** BOM |
+| Top queries empty | Enable DNS debug logging (Diagnostics → Debug logging) |
 
-1. **Connection Failed**: Ensure DNS server role is installed and running
-2. **Permission Denied**: Run PowerShell as Administrator
-3. **Execution Policy**: Set appropriate PowerShell execution policy
-4. **WPF Issues**: Ensure .NET Framework 4.7.2+ is installed
+## Known limitations / Bekannte Einschränkungen
 
-### Debug Mode
+- XML import uses `Import-Clixml`. Only import XML files you created yourself (see [SECURITY.md](SECURITY.md)).
+- Tested with the PowerShell parser, PSScriptAnalyzer and XAML checks; functional tests require a Windows DNS server.
+- No license file is included in the repository.
 
-Enable debug mode for detailed logging:
-```powershell
-$global:AppConfig.DebugMode = $true
-```
+## Author
 
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request with detailed description
-
-
-## Support & Contact
-
-- **Author**: Andreas Hepp
-- **Website**: [PHscripts.de](https://github.com/PS-easyIT/)
-- **GitHub**: [PS-easyIT/easyDNS](https://github.com/PS-easyIT/)
-- **Version**: 0.2.27
-- **Last Update**: 26.05.2025
-
-## Acknowledgments
-
-- Microsoft PowerShell Team for the robust PowerShell platform
-- Windows DNS Server team for comprehensive DNS management cmdlets
-- Community contributors for feedback and suggestions
-
----
-
-*easyDNS v0.2.27 - Simplifying DNS Management with Modern Technology*
+- **Author:** Andreas Hepp – PHscripts.de
+- **Repository:** <https://github.com/PS-PhinIT/PhinIT.PowerShell_DNS>
+- **Version:** 0.3.0 (14.10.2026)
