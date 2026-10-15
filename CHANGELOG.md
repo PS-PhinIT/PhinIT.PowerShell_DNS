@@ -4,6 +4,17 @@ All notable changes to easyDNS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 Every entry belongs to a released version with a date (`DD.MM.YYYY`).
 
+## 0.4.0 - 15.10.2026
+
+### Added
+- Audit & Logs → **Query Clients**: Live DNS Monitoring (option "DNS Queries") records incoming DNS queries per client IP – one row per IP with the number of queries, first/last seen and up to five queried names, instead of one entry per query. Optional name filter (host names/FQDNs, wildcards `*`/`?`, a short name also matches `name.<suffix>`), e.g. to find devices that still use an old Exchange server for SMTP (25) or POP3S (995). CSV export (sorted by query count) and Clear. Source is the DNS debug log (local or via the administrative share).
+- Audit & Logs → **Connection Clients**: Live DNS Monitoring (option "Connections") records allowed inbound connections to selected ports of a target server (e.g. the old Exchange server; default ports 25, 465, 587, 110, 995, 143, 993) from its Windows Firewall log – one row per client IP with the number of connections, the ports used and first/last connection. Shows the ports and also devices that use the server's IP address directly, which DNS cannot see. Column "DNS Queries" compares with the query clients (0 = no DNS query recorded → device probably configured with the IP address). Buttons to enable/disable firewall logging of allowed connections on the target server (with confirmation, Group Policy override is detected), CSV export and Clear.
+- Configuration keys `QueryClientMaxClients` (5000), `QueryClientMaxReadMB` (32), `ConnectionClientMaxClients` (5000) and `ConnectionClientMaxReadMB` (32).
+
+### Changed
+- Resource use during long recordings: only the newly written part of the DNS debug log and the firewall log is read per 30 s cycle (byte offset, max. 32 MB processed in 4 MB blocks, backlog is carried over, truncated or rotated logs are detected, a temporarily unreachable admin share does not cause a re-read), the files are only open while reading, memory grows with the number of client IPs and not with the number of queries or connections, the tables are only redrawn when they changed and the panel is visible.
+- DNS event log grid has a maximum height so its rows are virtualized.
+
 ## 0.3.0 - 14.10.2026
 
 Audit release. Full report: [docs/AUDIT.md](docs/AUDIT.md).

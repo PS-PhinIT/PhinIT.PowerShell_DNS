@@ -1,7 +1,7 @@
 ﻿#requires -RunAsAdministrator
 
 ###############################################################################
-# easyDNS v0.3.0 - Moderne WPF DNS-Verwaltung
+# easyDNS v0.4.0 - Moderne WPF DNS-Verwaltung
 # Komplett überarbeitet mit Windows 11 Design und WPF XAML
 # Optimiert für bessere Performance und Benutzerfreundlichkeit
 # Changelog: siehe CHANGELOG.md im Repository-Root
@@ -13,9 +13,9 @@
 $global:AppConfig = @{
     AppName = "easyDNS"
     Author = "PHscripts.de | Andreas Hepp"
-    ScriptVersion = "0.3.0"
+    ScriptVersion = "0.4.0"
     Website = "https://github.com/PS-PhinIT/PhinIT.PowerShell_DNS"
-    LastUpdate = "14.10.2026"
+    LastUpdate = "15.10.2026"
     
     # Design-Konfiguration (Windows 11 Style)
     ThemeColors = @{
@@ -45,6 +45,12 @@ $global:AppConfig = @{
     AutoRefreshInterval = 300  # Sekunden (5 Minuten)
     MaxLogEntries = 10000
     MaxCacheDisplay = 50
+    
+    # Query-/Connection-Client-Aufzeichnung (Audit & Logs): Grenzen fuer lange Laufzeiten
+    QueryClientMaxClients = 5000        # max. Anzahl unterschiedlicher Client-IPs (DNS-Debug-Log)
+    QueryClientMaxReadMB = 32           # max. MB des DNS-Debug-Logs je Monitoring-Durchlauf, verarbeitet in 4-MB-Bloecken (Rest folgt im naechsten Durchlauf)
+    ConnectionClientMaxClients = 5000   # max. Anzahl unterschiedlicher Client-IPs (Firewall-Log des Zielservers)
+    ConnectionClientMaxReadMB = 32      # max. MB des Firewall-Logs je Monitoring-Durchlauf, verarbeitet in 4-MB-Bloecken
     
     # DNS-Konfiguration
     DefaultTTL = 3600
@@ -3022,6 +3028,8 @@ $global:XamlString = @"
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="Audit and Logs" FontSize="24" FontWeight="SemiBold" 
@@ -3052,7 +3060,11 @@ $global:XamlString = @"
                                         </StackPanel>
                                         <StackPanel Orientation="Horizontal">
                                             <CheckBox Name="chkMonitorErrors" Content="DNS Errors" IsChecked="True" Margin="0,0,10,2" Foreground="#1C1C1C" Width="120"/>
-                                            <CheckBox Name="chkMonitorSecurity" Content="Security Events" IsChecked="True" Margin="0,0,0,20" Foreground="#1C1C1C" Width="135"/>
+                                            <CheckBox Name="chkMonitorSecurity" Content="Security Events" IsChecked="True" Margin="0,0,0,2" Foreground="#1C1C1C" Width="135"/>
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal">
+                                            <CheckBox Name="chkMonitorConnections" Content="Connections (firewall log of target server)" IsChecked="False" Margin="0,0,0,20" Foreground="#1C1C1C"
+                                                      ToolTip="Records allowed inbound connections per client IP on the ports of the target server (see Connection Clients)"/>
                                         </StackPanel>
                                         <TextBlock Name="lblMonitoringStatus" Text="Status: Stopped" 
                                                   Foreground="#D13438" FontWeight="SemiBold"/>
@@ -3083,6 +3095,12 @@ $global:XamlString = @"
                                         <TextBlock TextWrapping="Wrap" Foreground="#505050" LineHeight="18" Margin="0,0,0,5">
                                             <Run Text="- " FontWeight="Bold"/><Run Text="Monitor Events: Select specific event types like queries, zone changes, errors, and security events."/>
                                         </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Foreground="#505050" LineHeight="18" Margin="0,0,0,5">
+                                            <Run Text="- " FontWeight="Bold"/><Run Text="Query Clients: With 'DNS Queries' enabled every client IP is listed once with its number of queries (source: DNS debug log). Filter by the host name of an old server (e.g. Exchange) to find devices that still use it."/>
+                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Foreground="#505050" LineHeight="18" Margin="0,0,0,5">
+                                            <Run Text="- " FontWeight="Bold"/><Run Text="Connection Clients: With 'Connections' enabled every client IP that connects to the selected ports of the target server is listed once (source: Windows Firewall log of the target server). Shows the ports and also finds devices configured with the server's IP address. 'DNS Queries' = 0 means no recorded DNS query for the filtered names."/>
+                                        </TextBlock>
                                         <TextBlock Text="DNS Statistics:" FontWeight="SemiBold" Foreground="#505050" Margin="0,5,0,5"/>
                                         <TextBlock TextWrapping="Wrap" Foreground="#505050" LineHeight="18" Margin="0,0,0,5">
                                             <Run Text="- " FontWeight="Bold"/><Run Text="Refresh Statistics: Fetches and displays current DNS server performance metrics."/>
@@ -3095,7 +3113,94 @@ $global:XamlString = @"
                                 </Border>
                             </Grid>
 
+                            <!-- Query Clients: eine Zeile je Client-IP mit Zaehler (befuellt vom Live DNS Monitoring) -->
                             <Border Grid.Row="2" Style="{StaticResource Card}">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="Query Clients (one row per client IP)" FontSize="16" FontWeight="SemiBold" Foreground="#1C1C1C" Margin="0,0,0,12"/>
+                                    <Grid Grid.Row="1" Margin="0,0,0,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="400"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Name filter:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="#1C1C1C"/>
+                                        <TextBox Grid.Column="1" Name="txtQueryClientFilter" Style="{StaticResource ModernTextBox}" MaxHeight="30" MaxLength="1000" VerticalContentAlignment="Center" Padding="8,2"
+                                                 ToolTip="Optional: only queries for these names are counted, e.g. 'exch01, mail.contoso.com, smtp*'. Empty = all queries. Applied when monitoring starts."/>
+                                        <Button Grid.Column="2" Name="btnExportQueryClients" Content="Export CSV" VerticalAlignment="Center"
+                                               Margin="8,0,0,0" Style="{StaticResource ModernButton}"/>
+                                        <Button Grid.Column="3" Name="btnClearQueryClients" Content="Clear" VerticalAlignment="Center"
+                                               Margin="4,0,0,0" Background="#FF8C00" Style="{StaticResource ModernButton}"/>
+                                    </Grid>
+                                    <TextBlock Grid.Row="2" Name="lblQueryClientStatus" TextWrapping="Wrap" Foreground="#505050" Margin="0,0,0,8" MaxWidth="1100" HorizontalAlignment="Left"
+                                              Text="Not recording. Enable 'DNS Queries' and start Live DNS Monitoring (requires DNS debug logging, see Diagnostics)."/>
+                                    <!-- Feste Hoehe: nur sichtbare Zeilen werden erzeugt (Virtualisierung), auch bei tausenden IPs -->
+                                    <DataGrid Grid.Row="3" Name="dgQueryClients" AutoGenerateColumns="False" Height="260"
+                                             IsReadOnly="True" GridLinesVisibility="Horizontal" 
+                                             HeadersVisibility="Column" CanUserReorderColumns="False"
+                                             EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                                             Background="White" BorderBrush="#E0E0E0" BorderThickness="1">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Client IP" Binding="{Binding ClientIP}" Width="200"/>
+                                            <DataGridTextColumn Header="Queries" Binding="{Binding Queries}" Width="100" SortDirection="Descending"/>
+                                            <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeen}" Width="150"/>
+                                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen}" Width="150"/>
+                                            <DataGridTextColumn Header="Queried Names" Binding="{Binding QueriedNames}" Width="500"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </Grid>
+                            </Border>
+
+                            <!-- Connection Clients: Firewall-Log des Zielservers, eine Zeile je Client-IP (Ports und per IP-Adresse eingerichtete Geraete, die DNS nicht sieht) -->
+                            <Border Grid.Row="3" Style="{StaticResource Card}">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="Connection Clients (firewall log of a target server, one row per client IP)" FontSize="16" FontWeight="SemiBold" Foreground="#1C1C1C" Margin="0,0,0,12"/>
+                                    <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+                                        <TextBlock Text="Target server:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="#1C1C1C"/>
+                                        <TextBox Name="txtConnectionTarget" Width="200" Style="{StaticResource ModernTextBox}" MaxHeight="30" MaxLength="253" VerticalContentAlignment="Center" Padding="8,2"
+                                                 ToolTip="Server whose incoming connections are recorded, e.g. the old Exchange server (host name, FQDN or IPv4). Requires administrator rights on it (admin share and CIM/WinRM)."/>
+                                        <TextBlock Text="Ports:" VerticalAlignment="Center" Margin="12,0,8,0" Foreground="#1C1C1C"/>
+                                        <TextBox Name="txtConnectionPorts" Width="230" Text="25, 465, 587, 110, 995, 143, 993" Style="{StaticResource ModernTextBox}" MaxHeight="30" MaxLength="200" VerticalContentAlignment="Center" Padding="8,2"
+                                                 ToolTip="Local ports of the target server, e.g. 25 (SMTP), 465/587 (SMTP submission), 110/995 (POP3), 143/993 (IMAP). Max. 20 ports, applied when recording starts."/>
+                                        <Button Name="btnEnableConnectionLogging" Content="Enable Logging" VerticalAlignment="Center" Margin="8,0,0,0" Background="#107C10" Style="{StaticResource ModernButton}"
+                                                ToolTip="Windows Firewall of the target server: log allowed connections (all profiles)"/>
+                                        <Button Name="btnDisableConnectionLogging" Content="Disable Logging" VerticalAlignment="Center" Margin="4,0,0,0" Background="#D13438" Style="{StaticResource ModernButton}"
+                                                ToolTip="Windows Firewall of the target server: stop logging allowed connections (all profiles)"/>
+                                        <Button Name="btnExportConnectionClients" Content="Export CSV" VerticalAlignment="Center" Margin="4,0,0,0" Style="{StaticResource ModernButton}"/>
+                                        <Button Name="btnClearConnectionClients" Content="Clear" VerticalAlignment="Center" Margin="4,0,0,0" Background="#FF8C00" Style="{StaticResource ModernButton}"/>
+                                    </WrapPanel>
+                                    <TextBlock Grid.Row="2" Name="lblConnectionClientStatus" TextWrapping="Wrap" Foreground="#505050" Margin="0,0,0,8" MaxWidth="1100" HorizontalAlignment="Left"
+                                              Text="Not recording. Enter the target server and ports, check 'Connections' and start Live DNS Monitoring."/>
+                                    <DataGrid Grid.Row="3" Name="dgConnectionClients" AutoGenerateColumns="False" Height="260"
+                                             IsReadOnly="True" GridLinesVisibility="Horizontal" 
+                                             HeadersVisibility="Column" CanUserReorderColumns="False"
+                                             EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                                             Background="White" BorderBrush="#E0E0E0" BorderThickness="1">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Client IP" Binding="{Binding ClientIP}" Width="200"/>
+                                            <DataGridTextColumn Header="Connections" Binding="{Binding Connections}" Width="110" SortDirection="Descending"/>
+                                            <DataGridTextColumn Header="Ports" Binding="{Binding Ports}" Width="200"/>
+                                            <DataGridTextColumn Header="First Connection" Binding="{Binding FirstSeen}" Width="150"/>
+                                            <DataGridTextColumn Header="Last Connection" Binding="{Binding LastSeen}" Width="150"/>
+                                            <DataGridTextColumn Header="DNS Queries" Binding="{Binding DnsQueries}" Width="110"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </Grid>
+                            </Border>
+
+                            <Border Grid.Row="4" Style="{StaticResource Card}">
                                 <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/> 
@@ -3131,9 +3236,10 @@ $global:XamlString = @"
                                         </Grid>
                                     </StackPanel>
                                     
-                                    <DataGrid Grid.Row="1" Name="dgAuditLogs" AutoGenerateColumns="False" 
+                                    <DataGrid Grid.Row="1" Name="dgAuditLogs" AutoGenerateColumns="False" MaxHeight="400"
                                              IsReadOnly="True" GridLinesVisibility="Horizontal" 
                                              HeadersVisibility="Column" CanUserReorderColumns="False"
+                                             EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling"
                                              Background="White" BorderBrush="#E0E0E0" BorderThickness="1" Margin="0,0,0,12">
                                         <DataGrid.Columns>
                                             <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="150"/>
@@ -3227,8 +3333,11 @@ $global:Controls = @{}
     "dgDNSSECZones", "btnRefreshDNSSEC", "btnSignZone", "btnUnsignZone", "cmbDNSSECZone", "cmbDNSSECAlgorithm", "cmbKeyLength", "chkAutoRollover",
     "btnGenerateKeys", "btnExportKeys", "btnValidateSignatures", "btnForceRollover", "lblDNSSECStatus",
     # Audit/Logs Controls
-    "btnStartMonitoring", "btnStopMonitoring", "btnClearMonitoring", "chkMonitorQueries", "chkMonitorZoneChanges", "chkMonitorErrors", "chkMonitorSecurity", "lblMonitoringStatus",
+    "btnStartMonitoring", "btnStopMonitoring", "btnClearMonitoring", "chkMonitorQueries", "chkMonitorZoneChanges", "chkMonitorErrors", "chkMonitorSecurity", "chkMonitorConnections", "lblMonitoringStatus",
     "btnRefreshStats", "lblDNSStats", "btnExportLogs", "btnClearLogs", "cmbLogLevel", "txtLogSearch", "btnFilterLogs", "btnRefreshLogs", "dgAuditLogs",
+    "txtQueryClientFilter", "btnExportQueryClients", "btnClearQueryClients", "lblQueryClientStatus", "dgQueryClients",
+    "txtConnectionTarget", "txtConnectionPorts", "btnEnableConnectionLogging", "btnDisableConnectionLogging", "btnExportConnectionClients", "btnClearConnectionClients",
+    "lblConnectionClientStatus", "dgConnectionClients",
     # Erweiterte Diagnostic Tools Controls
     "btnDNSBenchmark", "btnLatencyTest", "btnDNSLeakTest", "btnTraceRoute", "btnGenerateReport", "txtTraceRouteTarget",
     # Monitoring Controls
@@ -3295,6 +3404,8 @@ function Show-Panel {
             }
             "audit" { 
                 Update-AuditLogs
+                Update-QueryClientView
+                Update-ConnectionClientView
             }
         }
         
@@ -3508,6 +3619,14 @@ $global:Controls.btnExportLogs.Add_Click({ Export-AuditLogs })
 $global:Controls.btnClearLogs.Add_Click({ Clear-AuditLogs })
 $global:Controls.btnFilterLogs.Add_Click({ Filter-AuditLogs })
 $global:Controls.btnRefreshLogs.Add_Click({ Update-AuditLogs })
+$global:Controls.btnExportQueryClients.Add_Click({ Export-QueryClientList })
+$global:Controls.btnClearQueryClients.Add_Click({ Clear-QueryClientList })
+$global:Controls.chkMonitorConnections.Add_Checked({ Enable-ConnectionClientRecording })
+$global:Controls.chkMonitorConnections.Add_Unchecked({ Update-ConnectionClientStatus })
+$global:Controls.btnEnableConnectionLogging.Add_Click({ Set-ConnectionLogging -Enabled $true })
+$global:Controls.btnDisableConnectionLogging.Add_Click({ Set-ConnectionLogging -Enabled $false })
+$global:Controls.btnExportConnectionClients.Add_Click({ Export-ConnectionClientList })
+$global:Controls.btnClearConnectionClients.Add_Click({ Clear-ConnectionClientList })
 
 # Neue Diagnostic Tools Event-Handler
 $global:Controls.btnResolve.Add_Click({ Run-ResolveTest })
@@ -4866,6 +4985,23 @@ function Invoke-DNSMonitoringCycle {
         }
     }
     
+    # Abfragen je Client-IP aus dem DNS-Debug-Log (nur der seit dem letzten Lauf neu geschriebene Teil)
+    if ($global:Controls.chkMonitorQueries.IsChecked) {
+        try { Update-QueryClientRecording } catch { Write-Log "Query client recording failed: $_" -Level "ERROR" }
+    } else {
+        # Beim erneuten Aktivieren am aktuellen Dateiende fortsetzen (Pause wird nicht nachgezaehlt)
+        $global:QueryClientRecorder.Offset = [int64]-1
+        Update-QueryClientStatus
+    }
+    
+    # Verbindungen je Client-IP aus dem Firewall-Log des Zielservers (nach den Query Clients -> aktuelle Werte fuer die Spalte "DNS Queries")
+    if ($global:Controls.chkMonitorConnections.IsChecked) {
+        try { Update-ConnectionClientRecording } catch { Write-Log "Connection client recording failed: $_" -Level "ERROR" }
+    } else {
+        $global:ConnectionClientRecorder.Offset = [int64]-1
+        Update-ConnectionClientStatus
+    }
+    
     $state.LastCheck = $now
 }
 
@@ -4890,9 +5026,22 @@ function Start-DNSMonitoring {
         # Ausgangswerte der Zaehler erfassen
         try { $global:MonitoringState.Counters = Get-DnsQueryCounters -ServerName $server } catch { }
         
+        # Aufzeichnung je Client-IP vorbereiten (Namensfilter, Zielserver und Ports werden hier geprueft)
+        try {
+            Initialize-QueryClientRecording -ServerName $server -FilterText $global:Controls.txtQueryClientFilter.Text
+            if ($global:Controls.chkMonitorConnections.IsChecked) {
+                $null = Initialize-ConnectionClientRecording -TargetServer $global:Controls.txtConnectionTarget.Text -PortsText $global:Controls.txtConnectionPorts.Text
+            }
+        } catch {
+            $global:MonitoringState = $null
+            Show-MessageBox "$($_.Exception.Message)" "Monitoring" "Warning"
+            return
+        }
+        
         $global:MonitoringActive = $true
         $global:Controls.lblMonitoringStatus.Text = "Status: Active"
         $global:Controls.lblMonitoringStatus.Foreground = "#107C10"
+        $global:Controls.txtQueryClientFilter.IsEnabled = $false
         
         # Echte Auswertung alle 30 Sekunden (Zaehler-Differenzen + Ereignisprotokolle)
         $global:MonitoringTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -4903,12 +5052,23 @@ function Start-DNSMonitoring {
         $global:MonitoringTimer.Start()
         
         Add-MonitoringEvent -EventType "MONITORING" -Message "DNS monitoring started (interval 30 s)" -Source "System"
+        if ($global:Controls.chkMonitorQueries.IsChecked) {
+            $filterInfo = if ($global:QueryClientRecorder.FilterText) { "names: $($global:QueryClientRecorder.FilterText)" } else { "all names" }
+            Add-MonitoringEvent -EventType "QUERY CLIENTS" -Message "Recording queries per client IP ($filterInfo) from $($global:QueryClientRecorder.LogPath)" -Source $server
+        }
+        if ($global:Controls.chkMonitorConnections.IsChecked) {
+            Add-ConnectionClientStartEvent
+        }
+        Update-QueryClientStatus
+        Update-ConnectionClientStatus
         Write-Log "DNS monitoring started for $server" -Level "INFO"
         
     } catch {
         $global:MonitoringActive = $false
         $global:Controls.lblMonitoringStatus.Text = "Status: Error"
         $global:Controls.lblMonitoringStatus.Foreground = "#D13438"
+        $global:Controls.txtQueryClientFilter.IsEnabled = $true
+        Update-ConnectionClientStatus
         Write-Log "Error starting DNS monitoring: $_" -Level "ERROR"
         Show-MessageBox "Error starting monitoring:`n$_" "Error" "Error"
     }
@@ -4930,6 +5090,9 @@ function Stop-DNSMonitoring {
         
         $global:Controls.lblMonitoringStatus.Text = "Status: Stopped"
         $global:Controls.lblMonitoringStatus.Foreground = "#D13438"
+        $global:Controls.txtQueryClientFilter.IsEnabled = $true
+        Update-QueryClientStatus
+        Update-ConnectionClientStatus
         
         Add-MonitoringEvent -EventType "MONITORING" -Message "DNS monitoring stopped" -Source "System"
         Write-Log "DNS monitoring stopped" -Level "INFO"
@@ -5053,6 +5216,797 @@ function Clear-AuditLogs {
         $global:AuditLogData.Clear()
         Update-AuditLogs
         Write-Log "Audit-Logs cleared" -Level "INFO"
+    }
+}
+
+###############################################################################
+# QUERY-CLIENT-AUFZEICHNUNG (eine Zeile je Client-IP mit Zaehler)
+###############################################################################
+# Ausgelegt fuer lange Laufzeiten (Stunden/Tage):
+# - aus dem DNS-Debug-Log wird je Monitoring-Durchlauf nur der neu angehaengte Teil gelesen (Byte-Offset, Obergrenze je Durchlauf,
+#   verarbeitet in Bloecken von LogReadChunkBytes -> begrenzter Spitzen-Speicher auch bei grossem Rueckstand)
+# - je Client-IP genau ein Eintrag, der nur hochgezaehlt wird: der Speicher waechst mit der Zahl der IPs, nicht der Abfragen
+# - Obergrenzen fuer die Zahl der IPs und der gespeicherten Namen je IP
+# - die Logdatei ist nur waehrend des Lesens geoeffnet; die Tabelle wird nur bei Aenderungen und sichtbarem Panel neu gezeichnet
+
+$global:QueryClientRecorder = @{
+    Index             = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Items             = [System.Collections.Generic.List[object]]::new()
+    # Eingehende Abfrage, z.B. "... UDP Rcv 192.168.1.50    1a2b   Q [0001   D   NOERROR] A      (6)exch01(7)contoso(5)local(0)"
+    # Gruppe 1 = Client-IP, Gruppe 2 = Name; Antworten (R-Flag) und gesendete Pakete (Snd) passen nicht
+    LineRegex         = [regex]::new('(?m)[ \t](?:UDP|TCP)[ \t]+Rcv[ \t]+(\S+)[ \t]+\S+[ \t]+Q[ \t]+\[[^\]\r\n]*\][ \t]+\S+[ \t]+(\S+)[ \t]*\r?$', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+    LabelRegex        = [regex]::new('\(\d+\)', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+    MaxNamesPerClient = 5
+    LogReadChunkBytes = [int64]4MB
+    ServerName        = ""
+    FilterText        = ""
+    Patterns          = @()
+    LogPath           = $null
+    LogFound          = $false
+    Offset            = [int64]-1
+    Pending           = [int64]0
+    LastRead          = [int64]0
+    Since             = $null
+    TotalQueries      = [int64]0
+    Dropped           = [int64]0
+    Changed           = $false
+    LimitWarned       = $false
+    LogWarned         = $false
+}
+
+function ConvertTo-QueryClientFilter {
+    # Namensfilter pruefen und in Wildcard-Muster umwandeln (leer = alle Abfragen zaehlen)
+    param([string]$Text)
+    
+    $options = [System.Management.Automation.WildcardOptions]::IgnoreCase
+    $patterns = [System.Collections.Generic.List[System.Management.Automation.WildcardPattern]]::new()
+    $terms = [System.Collections.Generic.List[string]]::new()
+    
+    foreach ($term in ([string]$Text -split '[\s,;]+')) {
+        $t = $term.Trim().TrimEnd('.').ToLowerInvariant()
+        if (-not $t -or $terms.Contains($t)) { continue }
+        if ($t.Length -gt 253 -or $t -notmatch '^[a-z0-9_*?-]+(\.[a-z0-9_*?-]+)*$') {
+            throw "Invalid name filter '$t'. Enter host names or FQDNs separated by commas; the wildcards * and ? are allowed."
+        }
+        $terms.Add($t)
+        $patterns.Add([System.Management.Automation.WildcardPattern]::new($t, $options))
+        if ($t -notmatch '[*?]') {
+            # Kurzname "exch01" trifft auch "exch01.contoso.local" (vom Client angehaengtes DNS-Suffix)
+            $patterns.Add([System.Management.Automation.WildcardPattern]::new("$t.*", $options))
+        }
+    }
+    if ($terms.Count -gt 20) {
+        throw "Too many names in the name filter ($($terms.Count)). Use at most 20 names or wildcards."
+    }
+    
+    return [PSCustomObject]@{
+        Text     = $terms -join ', '
+        Patterns = $patterns.ToArray()
+    }
+}
+
+function Reset-QueryClientRecording {
+    $rec = $global:QueryClientRecorder
+    $rec.Index.Clear()
+    $rec.Items.Clear()
+    $rec.TotalQueries = [int64]0
+    $rec.Dropped = [int64]0
+    $rec.LimitWarned = $false
+    $rec.Since = if ($global:MonitoringActive) { Get-Date } else { $null }
+    $rec.Changed = $true
+}
+
+function Initialize-QueryClientRecording {
+    # Beim Start des Live-Monitorings: Filter pruefen, Debug-Log ermitteln, ab dem aktuellen Dateiende aufzeichnen
+    param([string]$ServerName, [string]$FilterText)
+    
+    $rec = $global:QueryClientRecorder
+    $filter = ConvertTo-QueryClientFilter -Text $FilterText
+    
+    # Gleicher Server und Filter -> Aufzeichnung fortsetzen, sonst neu beginnen
+    if ($rec.ServerName -ne $ServerName -or $rec.FilterText -ne $filter.Text) {
+        if ($rec.Items.Count -gt 0) {
+            Write-Log "Query client recording reset (server or name filter changed)" -Level "INFO"
+        }
+        Reset-QueryClientRecording
+    }
+    $rec.ServerName = $ServerName
+    $rec.FilterText = $filter.Text
+    $rec.Patterns = $filter.Patterns
+    $rec.LogPath = Get-DnsDebugLogPath -ServerName $ServerName
+    $rec.Offset = [int64]-1
+    $rec.Pending = [int64]0
+    $rec.LogWarned = $false
+    if (-not $rec.Since) { $rec.Since = Get-Date }
+    
+    # Startposition merken (vorhandener Inhalt wird nicht ausgewertet)
+    try {
+        $null = Read-LogFileDelta -State $rec -MaxBytes 0
+    } catch {
+        Write-Log "Query clients: DNS debug log not readable: $_" -Level "DEBUG"
+    }
+}
+
+function Read-LogFileDelta {
+    # Liefert nur die seit dem letzten Aufruf angehaengten, vollstaendigen Zeilen einer Logdatei ($null = nichts Neues),
+    # genutzt fuer das DNS-Debug-Log und das Firewall-Log. Die Datei ist nur waehrend des Lesens geoeffnet, der Dienst schreibt parallel weiter.
+    # State: LogPath, Offset (-1 = am Dateiende beginnen), Pending (noch ungelesen), LastRead (in diesem Aufruf verbrauchte Bytes), LogFound
+    param([hashtable]$State, [int64]$MaxBytes)
+    
+    $State.Pending = [int64]0
+    $State.LastRead = [int64]0
+    if (-not (Test-Path -LiteralPath $State.LogPath -PathType Leaf)) {
+        $State.LogFound = $false
+        # Nur wenn der Ordner erreichbar ist, fehlt die Datei wirklich: wird sie spaeter angelegt, enthaelt sie nur neue Eintraege -> von Beginn an lesen.
+        # Bei Netzwerk-/Zugriffsfehlern (UNC) Position behalten, sonst wuerde das gesamte Log erneut gezaehlt.
+        $folder = [System.IO.Path]::GetDirectoryName($State.LogPath)
+        if ($folder -and (Test-Path -LiteralPath $folder -PathType Container)) {
+            $State.Offset = [int64]0
+        }
+        return $null
+    }
+    $State.LogFound = $true
+    
+    $read = 0
+    $stream = [System.IO.FileStream]::new($State.LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')
+    try {
+        $length = [int64]$stream.Length
+        if ($State.Offset -lt 0) {
+            # Start der Aufzeichnung: vorhandenen Inhalt ueberspringen
+            $State.Offset = $length
+            return $null
+        }
+        # Log neu angelegt bzw. abgeschnitten (max. Groesse erreicht) -> von vorne lesen
+        if ($length -lt $State.Offset) {
+            $State.Offset = [int64]0
+        }
+        
+        $available = $length - $State.Offset
+        if ($available -le 0 -or $MaxBytes -le 0) { return $null }
+        
+        $count = [int][math]::Min($available, $MaxBytes)
+        $buffer = New-Object byte[] $count
+        $null = $stream.Seek($State.Offset, [System.IO.SeekOrigin]::Begin)
+        while ($read -lt $count) {
+            $n = $stream.Read($buffer, $read, $count - $read)
+            if ($n -le 0) { break }
+            $read += $n
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    if ($read -le 0) { return $null }
+    
+    # Nur bis zum letzten Zeilenumbruch auswerten - die letzte Zeile wird evtl. gerade noch geschrieben
+    $end = [Array]::LastIndexOf($buffer, [byte]10, $read - 1)
+    if ($end -lt 0) {
+        # Voller Block ohne Zeilenumbruch: ueberspringen, damit die Aufzeichnung nicht haengen bleibt
+        if ($read -ge $MaxBytes) {
+            $State.Offset = [int64]$State.Offset + $read
+            $State.LastRead = [int64]$read
+            $State.Pending = $length - $State.Offset
+        }
+        return $null
+    }
+    $State.Offset = [int64]$State.Offset + $end + 1
+    $State.LastRead = [int64]$end + 1
+    $State.Pending = $length - $State.Offset
+    return [System.Text.Encoding]::UTF8.GetString($buffer, 0, $end + 1)
+}
+
+function Add-QueryClientData {
+    # Wertet Debug-Log-Zeilen aus: je Client-IP genau ein Eintrag, der nur hochgezaehlt wird. Rueckgabe: Anzahl gezaehlter Abfragen
+    param([string]$Text, [datetime]$Time = (Get-Date))
+    
+    $rec = $global:QueryClientRecorder
+    $maxClients = [int]$global:AppConfig.QueryClientMaxClients
+    $maxNames = [int]$rec.MaxNamesPerClient
+    $patterns = $rec.Patterns
+    $filterActive = $patterns.Count -gt 0
+    $timeText = $Time.ToString("yyyy-MM-dd HH:mm:ss")
+    $counted = 0
+    
+    $m = $rec.LineRegex.Match($Text)
+    while ($m.Success) {
+        $client = $m.Groups[1].Value
+        # Format im Log: (6)exch01(7)contoso(5)local(0) -> exch01.contoso.local
+        $name = $rec.LabelRegex.Replace($m.Groups[2].Value, '.').Trim('.').ToLowerInvariant()
+        $m = $m.NextMatch()
+        if (-not $name) { continue }
+        
+        if ($filterActive) {
+            $hit = $false
+            foreach ($pattern in $patterns) {
+                if ($pattern.IsMatch($name)) { $hit = $true; break }
+            }
+            if (-not $hit) { continue }
+        }
+        
+        $entry = $null
+        if (-not $rec.Index.TryGetValue($client, [ref]$entry)) {
+            if ($rec.Index.Count -ge $maxClients) {
+                $rec.Dropped++
+                continue
+            }
+            $entry = [PSCustomObject]@{
+                ClientIP     = $client
+                Queries      = [int64]0
+                FirstSeen    = $timeText
+                LastSeen     = $timeText
+                QueriedNames = ""
+                NameSet      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                MoreNames    = $false
+            }
+            $rec.Index.Add($client, $entry)
+            $rec.Items.Add($entry)
+        }
+        
+        $entry.Queries++
+        $entry.LastSeen = $timeText
+        if (-not $entry.MoreNames -and -not $entry.NameSet.Contains($name)) {
+            if ($entry.NameSet.Count -lt $maxNames) {
+                $null = $entry.NameSet.Add($name)
+                $entry.QueriedNames = $entry.NameSet -join ', '
+            } else {
+                # Weitere Namen nur kennzeichnen (begrenzter Speicher je IP)
+                $entry.MoreNames = $true
+                $entry.QueriedNames += ', ...'
+            }
+        }
+        $counted++
+    }
+    
+    if ($counted -gt 0) {
+        $rec.TotalQueries += $counted
+        $rec.Changed = $true
+    }
+    return $counted
+}
+
+function Update-QueryClientRecording {
+    # Ein Durchlauf aus Invoke-DNSMonitoringCycle: neue Debug-Log-Zeilen lesen und je Client-IP zaehlen
+    $rec = $global:QueryClientRecorder
+    if (-not $rec.LogPath) { return }
+    
+    try {
+        # Neue Daten blockweise verarbeiten (max. QueryClientMaxReadMB je Durchlauf, Rest folgt im naechsten Durchlauf)
+        $maxTotal = [int64]$global:AppConfig.QueryClientMaxReadMB * 1MB
+        $chunk = [int64][math]::Min($maxTotal, $rec.LogReadChunkBytes)
+        $now = Get-Date
+        $total = [int64]0
+        do {
+            $text = Read-LogFileDelta -State $rec -MaxBytes $chunk
+            if ($text) {
+                $null = Add-QueryClientData -Text $text -Time $now
+                $text = $null
+            }
+            $total += $rec.LastRead
+        } while ($rec.LastRead -gt 0 -and $rec.Pending -gt 0 -and ($total + $chunk) -le $maxTotal)
+        if (-not $rec.LogFound -and -not $rec.LogWarned) {
+            $rec.LogWarned = $true
+            Add-MonitoringEvent -EventType "QUERY CLIENTS" -Message "DNS debug log not found: $($rec.LogPath). Enable it via Diagnostics > Enable Debug Logging." -Source $rec.ServerName -Level "WARN"
+        }
+    } catch {
+        if (-not $rec.LogWarned) {
+            $rec.LogWarned = $true
+            Add-MonitoringEvent -EventType "QUERY CLIENTS" -Message "DNS debug log not readable: $($_.Exception.Message)" -Source $rec.ServerName -Level "WARN"
+        }
+        Write-Log "Query clients: DNS debug log not readable: $_" -Level "DEBUG"
+    }
+    
+    if ($rec.Dropped -gt 0 -and -not $rec.LimitWarned) {
+        $rec.LimitWarned = $true
+        Add-MonitoringEvent -EventType "QUERY CLIENTS" -Message "Limit of $($global:AppConfig.QueryClientMaxClients) client IPs reached - queries of further IPs are not recorded" -Source $rec.ServerName -Level "WARN"
+    }
+    
+    if ($global:CurrentPanel -eq "audit") {
+        Update-QueryClientView
+    }
+}
+
+function Update-QueryClientStatus {
+    $rec = $global:QueryClientRecorder
+    $label = $global:Controls.lblQueryClientStatus
+    if (-not $label) { return }
+    
+    $recording = $global:MonitoringActive -and $global:Controls.chkMonitorQueries.IsChecked
+    if (-not $recording -and $rec.Items.Count -eq 0) {
+        $label.Text = "Not recording. Enable 'DNS Queries' and start Live DNS Monitoring (requires DNS debug logging, see Diagnostics)."
+        return
+    }
+    
+    $since = if ($rec.Since) { " since $($rec.Since.ToString('yyyy-MM-dd HH:mm:ss'))" } else { "" }
+    $state = if ($recording) { "Recording$since" } elseif ($global:MonitoringActive) { "Paused ('DNS Queries' unchecked)" } else { "Stopped" }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add($state)
+    $parts.Add(("{0:N0} client IPs" -f $rec.Items.Count))
+    $parts.Add(("{0:N0} queries" -f $rec.TotalQueries))
+    $parts.Add($(if ($rec.FilterText) { "Filter: $($rec.FilterText)" } else { "Filter: none (all names)" }))
+    if ($recording -and -not $rec.LogFound) { $parts.Add("Debug log not found: $($rec.LogPath)") }
+    if ($recording -and $rec.Pending -gt 0) { $parts.Add(("Backlog: {0:N1} MB" -f ($rec.Pending / 1MB))) }
+    if ($rec.Dropped -gt 0) {
+        $parts.Add(("Limit of {0:N0} IPs reached: {1:N0} queries of further IPs not recorded" -f [int]$global:AppConfig.QueryClientMaxClients, $rec.Dropped))
+    }
+    $label.Text = $parts -join " | "
+}
+
+function Update-QueryClientView {
+    # Dieselbe Liste bleibt gebunden; Items.Refresh() zeichnet nur neu und behaelt die Sortierung des Benutzers
+    $rec = $global:QueryClientRecorder
+    try {
+        if ($rec.Changed -and $global:Controls.dgQueryClients) {
+            $global:Controls.dgQueryClients.Items.Refresh()
+            $rec.Changed = $false
+        }
+        Update-QueryClientStatus
+    } catch {
+        Write-Log "Error updating query client view: $_" -Level "ERROR"
+    }
+}
+
+function Clear-QueryClientList {
+    $rec = $global:QueryClientRecorder
+    if ($rec.Items.Count -gt 0) {
+        $result = Show-MessageBox "Do you want to clear the recorded query clients ($($rec.Items.Count) IPs)?" "Clear query clients" "Warning" "YesNo"
+        if ([string]$result -ne "Yes") { return }
+    }
+    Reset-QueryClientRecording
+    Update-QueryClientView
+    Write-Log "Query client recording cleared" -Level "INFO"
+}
+
+function Export-QueryClientList {
+    $rec = $global:QueryClientRecorder
+    if ($rec.Items.Count -eq 0) {
+        Show-MessageBox "No query clients recorded yet." "Export" "Information"
+        return
+    }
+    $exportPath = Show-SaveFileDialog -Filter "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*" -Title "Export query clients"
+    if (-not $exportPath) { return }
+    
+    try {
+        $server = $rec.ServerName
+        $filterText = $rec.FilterText
+        # Namen stammen von den Clients: Formelzeichen am Zellanfang neutralisieren (CSV-Injection in Tabellenkalkulationen)
+        $rec.Items | Sort-Object Queries -Descending | Select-Object ClientIP, Queries, FirstSeen, LastSeen,
+            @{ Name = 'QueriedNames'; Expression = { if ($_.QueriedNames -match '^[=+\-@\t\r]') { "'" + $_.QueriedNames } else { $_.QueriedNames } } },
+            @{ Name = 'Server'; Expression = { $server } },
+            @{ Name = 'NameFilter'; Expression = { $filterText } } |
+            Export-Csv -LiteralPath $exportPath -NoTypeInformation -Encoding UTF8
+        Show-MessageBox "Query clients exported successfully to:`n$exportPath" "Export successful"
+        Write-Log "Query clients exported to: $exportPath ($($rec.Items.Count) IPs)" -Level "INFO"
+    } catch {
+        Write-Log "Error exporting query clients: $_" -Level "ERROR"
+        Show-MessageBox "Error exporting query clients:`n$_" "Error" "Error"
+    }
+}
+
+###############################################################################
+# CONNECTION-CLIENT-AUFZEICHNUNG (Firewall-Log eines Zielservers, eine Zeile je Client-IP)
+###############################################################################
+# Ergaenzt die Query Clients um das, was DNS nicht sehen kann:
+# - Ports: gezaehlt werden erlaubte eingehende Verbindungen auf die gewaehlten Ports (z.B. 25/995 des alten Exchange-Servers)
+# - Geraete, die direkt mit der IP-Adresse des Servers eingerichtet sind (keine DNS-Abfrage)
+# Quelle: Windows-Firewall-Log ("Log successful connections", pfirewall.log) des Zielservers, lokal oder per Admin-Freigabe.
+# Gleiches Ressourcen-Konzept wie die Query Clients: inkrementelles Lesen in Bloecken, ein Eintrag je IP, Obergrenzen.
+
+$global:ConnectionClientRecorder = @{
+    Index             = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Items             = [System.Collections.Generic.List[object]]::new()
+    LineRegex         = $null    # wird beim Start mit den gewaehlten Ports erzeugt
+    LogReadChunkBytes = [int64]4MB
+    TargetServer      = ""
+    PortsText         = ""
+    LogPath           = $null
+    LogFound          = $false
+    LogAllowed        = $null    # Firewall-Einstellung "Log successful connections": $true/$false, $null = unbekannt
+    LogNote           = $null
+    Offset            = [int64]-1
+    Pending           = [int64]0
+    LastRead          = [int64]0
+    Since             = $null
+    TotalConnections  = [int64]0
+    Dropped           = [int64]0
+    Changed           = $false
+    LimitWarned       = $false
+    LogWarned         = $false
+}
+
+function Test-ConnectionTargetName {
+    # Hostname/FQDN oder IPv4-Adresse; wird fuer UNC-Pfad und CIM verwendet (IPv6 ist als UNC-Pfad nicht direkt nutzbar)
+    param([string]$Name)
+    
+    if (-not (Test-DnsServerName -Name $Name)) { return $false }
+    return ($Name -notmatch ':')
+}
+
+function ConvertTo-ConnectionPortList {
+    # Portliste pruefen, z.B. "25, 465, 587, 110, 995, 143, 993" (1 bis 20 Ports)
+    param([string]$Text)
+    
+    $ports = [System.Collections.Generic.List[int]]::new()
+    foreach ($term in ([string]$Text -split '[\s,;]+')) {
+        if (-not $term) { continue }
+        $port = 0
+        if ($term -notmatch '^\d{1,5}$' -or -not [int]::TryParse($term, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+            throw "Invalid port '$term'. Enter port numbers (1-65535) separated by commas, e.g. 25, 995."
+        }
+        if (-not $ports.Contains($port)) { $ports.Add($port) }
+    }
+    if ($ports.Count -eq 0) { throw "Enter at least one port for 'Connections', e.g. 25, 995." }
+    if ($ports.Count -gt 20) { throw "Too many ports ($($ports.Count)). Use at most 20 ports." }
+    
+    return [PSCustomObject]@{
+        Text  = $ports -join ', '
+        Ports = $ports.ToArray()
+    }
+}
+
+function ConvertTo-ServerFilePath {
+    # Lokalen Dateipfad eines Servers in einen von hier lesbaren Pfad umwandeln (Remote: %SystemRoot%/Laufwerk -> Admin-Freigabe)
+    param([string]$Path, [string]$ServerName)
+    
+    if (Test-IsLocalServer -ServerName $ServerName) {
+        return [System.Environment]::ExpandEnvironmentVariables($Path)
+    }
+    if ($Path -match '^%(systemroot|windir)%(.*)$') {
+        return ('\\{0}\ADMIN$' -f $ServerName) + $Matches[2]
+    }
+    if ($Path -match '^([A-Za-z]):\\(.*)$') {
+        return ('\\{0}\{1}$\' -f $ServerName, $Matches[1]) + $Matches[2]
+    }
+    return $Path
+}
+
+function Get-FirewallLogInfo {
+    # Pfad des Windows-Firewall-Logs und Status "Log successful connections" eines Servers (wirksame Richtlinie inkl. GPO)
+    param([string]$ServerName)
+    
+    $info = [PSCustomObject]@{ Path = $null; LogAllowed = $null; Profile = $null; Note = $null }
+    $path = $null
+    $cimParams = if (Test-IsLocalServer -ServerName $ServerName) { @{} } else { @{ CimSession = $ServerName } }
+    try {
+        $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore @cimParams -ErrorAction Stop)
+        $ordered = @(foreach ($name in 'Domain', 'Private', 'Public') { $profiles | Where-Object { [string]$_.Name -eq $name } })
+        $enabled = @($ordered | Where-Object { [string]$_.Enabled -eq 'True' })
+        $chosen = $enabled | Where-Object { [string]$_.LogAllowed -eq 'True' } | Select-Object -First 1
+        if ($chosen) {
+            $info.LogAllowed = $true
+        } else {
+            $info.LogAllowed = $false
+            $chosen = if ($enabled.Count -gt 0) { $enabled[0] } else { $ordered | Select-Object -First 1 }
+            if ($enabled.Count -eq 0) { $info.Note = "Windows Firewall is disabled on all profiles - no connections are logged" }
+        }
+        if ($chosen) {
+            $info.Profile = [string]$chosen.Name
+            $p = [string]$chosen.LogFileName
+            if ($p -and $p -ne 'NotConfigured') { $path = $p }
+        }
+    } catch {
+        $info.Note = "Firewall settings not readable ($($_.Exception.Message)) - using the default log path"
+    }
+    if (-not $path) { $path = '%systemroot%\system32\LogFiles\Firewall\pfirewall.log' }
+    $info.Path = ConvertTo-ServerFilePath -Path $path -ServerName $ServerName
+    return $info
+}
+
+function Reset-ConnectionClientRecording {
+    $rec = $global:ConnectionClientRecorder
+    $rec.Index.Clear()
+    $rec.Items.Clear()
+    $rec.TotalConnections = [int64]0
+    $rec.Dropped = [int64]0
+    $rec.LimitWarned = $false
+    $rec.Since = if ($global:MonitoringActive) { Get-Date } else { $null }
+    $rec.Changed = $true
+}
+
+function Initialize-ConnectionClientRecording {
+    # Beim Start (bzw. Aktivieren von 'Connections'): Eingaben pruefen, Firewall-Log ermitteln, ab dem aktuellen Dateiende aufzeichnen
+    param([string]$TargetServer, [string]$PortsText)
+    
+    $rec = $global:ConnectionClientRecorder
+    $target = ([string]$TargetServer).Trim().TrimEnd('.')
+    if (-not $target) { throw "Enter the target server for 'Connections' (e.g. the old Exchange server)." }
+    if (-not (Test-ConnectionTargetName -Name $target)) { throw "Invalid target server '$target'. Use a host name, FQDN or IPv4 address." }
+    $portList = ConvertTo-ConnectionPortList -Text $PortsText
+    
+    # Gleicher Zielserver und gleiche Ports -> Aufzeichnung fortsetzen, sonst neu beginnen
+    if ($rec.TargetServer -ne $target -or $rec.PortsText -ne $portList.Text) {
+        if ($rec.Items.Count -gt 0) {
+            Write-Log "Connection client recording reset (target server or ports changed)" -Level "INFO"
+        }
+        Reset-ConnectionClientRecording
+    }
+    $rec.TargetServer = $target
+    $rec.PortsText = $portList.Text
+    # Erlaubte eingehende Verbindung, z.B. "2026-10-15 10:00:01 ALLOW TCP 192.168.1.50 192.168.1.10 51234 25 0 - 0 0 0 - - - RECEIVE"
+    # Gruppe 1 = Zeit, 2 = Client-IP (src-ip), 3 = Server-IP (dst-ip), 4 = Zielport; nur die gewaehlten Ports passen (nur Ziffern -> keine Regex-Sonderzeichen)
+    $portPattern = ($portList.Ports | ForEach-Object { [string]$_ }) -join '|'
+    $rec.LineRegex = [regex]::new('(?m)^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ALLOW (?:TCP|UDP) (\S+) (\S+) \d+ (' + $portPattern + ') (?:\S+ ){8}RECEIVE(?=\s|$)', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+    
+    $logInfo = Get-FirewallLogInfo -ServerName $target
+    $rec.LogPath = $logInfo.Path
+    $rec.LogAllowed = $logInfo.LogAllowed
+    $rec.LogNote = $logInfo.Note
+    $rec.Offset = [int64]-1
+    $rec.Pending = [int64]0
+    $rec.LastRead = [int64]0
+    $rec.LogWarned = $false
+    if (-not $rec.Since) { $rec.Since = Get-Date }
+    
+    # Startposition merken (vorhandener Inhalt wird nicht ausgewertet)
+    try {
+        $null = Read-LogFileDelta -State $rec -MaxBytes 0
+    } catch {
+        Write-Log "Connection clients: firewall log not readable: $_" -Level "DEBUG"
+    }
+    return $logInfo
+}
+
+function Enable-ConnectionClientRecording {
+    # 'Connections' waehrend des laufenden Monitorings aktiviert: Aufzeichnung jetzt vorbereiten (ab aktuellem Dateiende)
+    if (-not $global:MonitoringActive) {
+        Update-ConnectionClientStatus
+        return
+    }
+    try {
+        $null = Initialize-ConnectionClientRecording -TargetServer $global:Controls.txtConnectionTarget.Text -PortsText $global:Controls.txtConnectionPorts.Text
+        Add-ConnectionClientStartEvent
+    } catch {
+        $global:Controls.chkMonitorConnections.IsChecked = $false
+        Show-MessageBox "$($_.Exception.Message)" "Monitoring" "Warning"
+    }
+    Update-ConnectionClientStatus
+}
+
+function Add-ConnectionClientStartEvent {
+    $rec = $global:ConnectionClientRecorder
+    Add-MonitoringEvent -EventType "CONNECTION CLIENTS" -Message "Recording connections per client IP to $($rec.TargetServer) (ports $($rec.PortsText)) from $($rec.LogPath)" -Source $rec.TargetServer
+    if ($rec.LogNote) {
+        Add-MonitoringEvent -EventType "CONNECTION CLIENTS" -Message $rec.LogNote -Source $rec.TargetServer -Level "WARN"
+    }
+    if ($rec.LogAllowed -eq $false) {
+        Add-MonitoringEvent -EventType "CONNECTION CLIENTS" -Message "Logging of allowed connections is disabled in the Windows Firewall of $($rec.TargetServer) - use 'Enable Logging'" -Source $rec.TargetServer -Level "WARN"
+    }
+}
+
+function Add-ConnectionClientData {
+    # Wertet Firewall-Log-Zeilen aus: je Client-IP genau ein Eintrag (Verbindungen, Ports, erste/letzte Verbindung laut Log). Rueckgabe: Anzahl gezaehlter Verbindungen
+    param([string]$Text)
+    
+    $rec = $global:ConnectionClientRecorder
+    if (-not $rec.LineRegex) { return 0 }
+    $maxClients = [int]$global:AppConfig.ConnectionClientMaxClients
+    $counted = 0
+    
+    $m = $rec.LineRegex.Match($Text)
+    while ($m.Success) {
+        $time = $m.Groups[1].Value
+        $client = $m.Groups[2].Value
+        $server = $m.Groups[3].Value
+        $port = [int]$m.Groups[4].Value
+        $m = $m.NextMatch()
+        # Verbindungen des Servers zu sich selbst (z.B. Exchange-Dienste untereinander) nicht zaehlen
+        if ($client -eq $server -or $client -eq '::1' -or $client.StartsWith('127.')) { continue }
+        
+        $entry = $null
+        if (-not $rec.Index.TryGetValue($client, [ref]$entry)) {
+            $ip = $null
+            if (-not [System.Net.IPAddress]::TryParse($client, [ref]$ip)) { continue }
+            if ($rec.Index.Count -ge $maxClients) {
+                $rec.Dropped++
+                continue
+            }
+            $entry = [PSCustomObject]@{
+                ClientIP    = $client
+                Connections = [int64]0
+                Ports       = ""
+                FirstSeen   = $time
+                LastSeen    = $time
+                DnsQueries  = $null
+                PortSet     = [System.Collections.Generic.SortedSet[int]]::new()
+            }
+            $rec.Index.Add($client, $entry)
+            $rec.Items.Add($entry)
+        }
+        
+        $entry.Connections++
+        if ([string]::CompareOrdinal($time, $entry.LastSeen) -gt 0) { $entry.LastSeen = $time }
+        if ([string]::CompareOrdinal($time, $entry.FirstSeen) -lt 0) { $entry.FirstSeen = $time }
+        # Max. so viele Ports wie gewaehlt (<= 20) -> begrenzter Speicher je IP
+        if ($entry.PortSet.Add($port)) { $entry.Ports = $entry.PortSet -join ', ' }
+        $counted++
+    }
+    
+    if ($counted -gt 0) {
+        $rec.TotalConnections += $counted
+        $rec.Changed = $true
+    }
+    return $counted
+}
+
+function Update-ConnectionClientDnsColumn {
+    # Spalte "DNS Queries": Abfragen derselben IP laut Query Clients. 0 = Verbindungen ohne aufgezeichnete DNS-Abfrage
+    # (Geraet nutzt vermutlich direkt die IP-Adresse des Servers, einen anderen DNS-Server oder eine zwischengespeicherte Antwort)
+    $rec = $global:ConnectionClientRecorder
+    $queryRec = $global:QueryClientRecorder
+    $available = $queryRec.Index.Count -gt 0 -or ($global:MonitoringActive -and $global:Controls.chkMonitorQueries.IsChecked -and $queryRec.LogFound)
+    
+    foreach ($entry in $rec.Items) {
+        $value = $null
+        if ($available) {
+            $q = $null
+            $value = if ($queryRec.Index.TryGetValue($entry.ClientIP, [ref]$q)) { [int64]$q.Queries } else { [int64]0 }
+        }
+        if ($entry.DnsQueries -ne $value) {
+            $entry.DnsQueries = $value
+            $rec.Changed = $true
+        }
+    }
+}
+
+function Update-ConnectionClientRecording {
+    # Ein Durchlauf aus Invoke-DNSMonitoringCycle: neue Firewall-Log-Zeilen lesen und je Client-IP zaehlen
+    $rec = $global:ConnectionClientRecorder
+    if (-not $rec.LogPath) { return }
+    
+    try {
+        # Neue Daten blockweise verarbeiten (max. ConnectionClientMaxReadMB je Durchlauf, Rest folgt im naechsten Durchlauf)
+        $maxTotal = [int64]$global:AppConfig.ConnectionClientMaxReadMB * 1MB
+        $chunk = [int64][math]::Min($maxTotal, $rec.LogReadChunkBytes)
+        $total = [int64]0
+        do {
+            $text = Read-LogFileDelta -State $rec -MaxBytes $chunk
+            if ($text) {
+                $null = Add-ConnectionClientData -Text $text
+                $text = $null
+            }
+            $total += $rec.LastRead
+        } while ($rec.LastRead -gt 0 -and $rec.Pending -gt 0 -and ($total + $chunk) -le $maxTotal)
+        if (-not $rec.LogFound -and -not $rec.LogWarned) {
+            $rec.LogWarned = $true
+            Add-MonitoringEvent -EventType "CONNECTION CLIENTS" -Message "Firewall log not found: $($rec.LogPath). Enable logging of allowed connections on $($rec.TargetServer) ('Enable Logging')." -Source $rec.TargetServer -Level "WARN"
+        }
+    } catch {
+        if (-not $rec.LogWarned) {
+            $rec.LogWarned = $true
+            Add-MonitoringEvent -EventType "CONNECTION CLIENTS" -Message "Firewall log not readable: $($_.Exception.Message)" -Source $rec.TargetServer -Level "WARN"
+        }
+        Write-Log "Connection clients: firewall log not readable: $_" -Level "DEBUG"
+    }
+    
+    Update-ConnectionClientDnsColumn
+    
+    if ($rec.Dropped -gt 0 -and -not $rec.LimitWarned) {
+        $rec.LimitWarned = $true
+        Add-MonitoringEvent -EventType "CONNECTION CLIENTS" -Message "Limit of $($global:AppConfig.ConnectionClientMaxClients) client IPs reached - connections of further IPs are not recorded" -Source $rec.TargetServer -Level "WARN"
+    }
+    
+    if ($global:CurrentPanel -eq "audit") {
+        Update-ConnectionClientView
+    }
+}
+
+function Update-ConnectionClientStatus {
+    $rec = $global:ConnectionClientRecorder
+    $recording = $global:MonitoringActive -and $global:Controls.chkMonitorConnections.IsChecked
+    
+    # Zielserver/Ports nur aenderbar, solange nicht aufgezeichnet wird (wirksam beim Start bzw. Aktivieren von 'Connections')
+    if ($global:Controls.txtConnectionTarget) { $global:Controls.txtConnectionTarget.IsEnabled = -not $recording }
+    if ($global:Controls.txtConnectionPorts) { $global:Controls.txtConnectionPorts.IsEnabled = -not $recording }
+    
+    $label = $global:Controls.lblConnectionClientStatus
+    if (-not $label) { return }
+    if (-not $recording -and $rec.Items.Count -eq 0) {
+        $label.Text = "Not recording. Enter the target server (e.g. the old Exchange server) and ports, check 'Connections' and start Live DNS Monitoring (requires logging of allowed connections in the Windows Firewall of the target server)."
+        return
+    }
+    
+    $since = if ($rec.Since) { " since $($rec.Since.ToString('yyyy-MM-dd HH:mm:ss'))" } else { "" }
+    $state = if ($recording) { "Recording$since" } elseif ($global:MonitoringActive) { "Paused ('Connections' unchecked)" } else { "Stopped" }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add($state)
+    $parts.Add("Target: $($rec.TargetServer)")
+    $parts.Add("Ports: $($rec.PortsText)")
+    $parts.Add(("{0:N0} client IPs" -f $rec.Items.Count))
+    $parts.Add(("{0:N0} connections" -f $rec.TotalConnections))
+    if ($recording -and $rec.LogAllowed -eq $false) { $parts.Add("Logging of allowed connections is disabled on the target server ('Enable Logging')") }
+    if ($recording -and -not $rec.LogFound) { $parts.Add("Firewall log not found: $($rec.LogPath)") }
+    if ($recording -and $rec.Pending -gt 0) { $parts.Add(("Backlog: {0:N1} MB" -f ($rec.Pending / 1MB))) }
+    if ($rec.Dropped -gt 0) {
+        $parts.Add(("Limit of {0:N0} IPs reached: {1:N0} connections of further IPs not recorded" -f [int]$global:AppConfig.ConnectionClientMaxClients, $rec.Dropped))
+    }
+    $label.Text = $parts -join " | "
+}
+
+function Update-ConnectionClientView {
+    # Dieselbe Liste bleibt gebunden; Items.Refresh() zeichnet nur neu und behaelt die Sortierung des Benutzers
+    $rec = $global:ConnectionClientRecorder
+    try {
+        if ($rec.Changed -and $global:Controls.dgConnectionClients) {
+            $global:Controls.dgConnectionClients.Items.Refresh()
+            $rec.Changed = $false
+        }
+        Update-ConnectionClientStatus
+    } catch {
+        Write-Log "Error updating connection client view: $_" -Level "ERROR"
+    }
+}
+
+function Clear-ConnectionClientList {
+    $rec = $global:ConnectionClientRecorder
+    if ($rec.Items.Count -gt 0) {
+        $result = Show-MessageBox "Do you want to clear the recorded connection clients ($($rec.Items.Count) IPs)?" "Clear connection clients" "Warning" "YesNo"
+        if ([string]$result -ne "Yes") { return }
+    }
+    Reset-ConnectionClientRecording
+    Update-ConnectionClientView
+    Write-Log "Connection client recording cleared" -Level "INFO"
+}
+
+function Export-ConnectionClientList {
+    $rec = $global:ConnectionClientRecorder
+    if ($rec.Items.Count -eq 0) {
+        Show-MessageBox "No connection clients recorded yet." "Export" "Information"
+        return
+    }
+    $exportPath = Show-SaveFileDialog -Filter "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*" -Title "Export connection clients"
+    if (-not $exportPath) { return }
+    
+    try {
+        $target = $rec.TargetServer
+        $rec.Items | Sort-Object Connections -Descending |
+            Select-Object ClientIP, Connections, Ports, FirstSeen, LastSeen, DnsQueries, @{ Name = 'TargetServer'; Expression = { $target } } |
+            Export-Csv -LiteralPath $exportPath -NoTypeInformation -Encoding UTF8
+        Show-MessageBox "Connection clients exported successfully to:`n$exportPath" "Export successful"
+        Write-Log "Connection clients exported to: $exportPath ($($rec.Items.Count) IPs)" -Level "INFO"
+    } catch {
+        Write-Log "Error exporting connection clients: $_" -Level "ERROR"
+        Show-MessageBox "Error exporting connection clients:`n$_" "Error" "Error"
+    }
+}
+
+function Set-ConnectionLogging {
+    # Windows-Firewall des Zielservers: Protokollierung erlaubter Verbindungen ein-/ausschalten (alle Profile, lokal oder per CIM)
+    param([bool]$Enabled)
+    
+    $target = ([string]$global:Controls.txtConnectionTarget.Text).Trim().TrimEnd('.')
+    if (-not $target -or -not (Test-ConnectionTargetName -Name $target)) {
+        Show-MessageBox "Enter a valid target server (host name, FQDN or IPv4 address) in 'Connection Clients'." "Connection logging" "Warning"
+        return
+    }
+    $action = if ($Enabled) { "Enable" } else { "Disable" }
+    $question = if ($Enabled) {
+        "Enable logging of allowed connections in the Windows Firewall on '$target' (profiles Domain, Private, Public)?`n`nThe firewall log then contains the IP addresses of all clients connecting to this server (personal data). Disable it after the analysis."
+    } else {
+        "Disable logging of allowed connections in the Windows Firewall on '$target' (profiles Domain, Private, Public)?"
+    }
+    $result = Show-MessageBox $question "$action connection logging" "Question" "YesNo"
+    if ([string]$result -ne "Yes") { return }
+    
+    try {
+        $cimParams = if (Test-IsLocalServer -ServerName $target) { @{} } else { @{ CimSession = $target } }
+        $value = if ($Enabled) { 'True' } else { 'False' }
+        Set-NetFirewallProfile -Profile Domain, Private, Public -LogAllowed $value @cimParams -ErrorAction Stop
+        Write-Log "Firewall logging of allowed connections set to $value on $target" -Level "INFO"
+        
+        # Wirksame Einstellung pruefen (eine Gruppenrichtlinie kann die lokale Einstellung uebersteuern)
+        $info = Get-FirewallLogInfo -ServerName $target
+        $rec = $global:ConnectionClientRecorder
+        if ($rec.TargetServer -eq $target) {
+            $rec.LogAllowed = $info.LogAllowed
+            Update-ConnectionClientStatus
+        }
+        if ($null -ne $info.LogAllowed -and $info.LogAllowed -ne $Enabled) {
+            Show-MessageBox "The setting was saved on '$target', but the effective firewall policy differs (probably configured by Group Policy).`n`nLog file: $($info.Path)" "Connection logging" "Warning"
+        } else {
+            $state = if ($Enabled) { "enabled" } else { "disabled" }
+            Show-MessageBox "Logging of allowed connections is $state on '$target'.`n`nLog file: $($info.Path)" "Connection logging"
+        }
+    } catch {
+        Write-Log "Error setting firewall logging on ${target}: $_" -Level "ERROR"
+        Show-MessageBox "Error changing the firewall logging on '$target':`n$($_.Exception.Message)`n`nAlternative on the target server (PowerShell as administrator):`nSet-NetFirewallProfile -Profile Domain,Private,Public -LogAllowed $value" "Error" "Error"
     }
 }
 
@@ -7163,6 +8117,12 @@ Write-Log "Detected DNS-Server: $global:DetectedDnsServer" -Level "INFO"
 
 # DNS-Server in GUI setzen
 $global:Controls.txtDNSServer.Text = $global:DetectedDnsServer
+
+# Query-/Connection-Client-Tabellen einmalig an die Aufzeichnungslisten binden (Standard-Sortierung: hoechster Zaehler zuerst)
+$global:Controls.dgQueryClients.ItemsSource = $global:QueryClientRecorder.Items
+$global:Controls.dgQueryClients.Items.SortDescriptions.Add([System.ComponentModel.SortDescription]::new("Queries", [System.ComponentModel.ListSortDirection]::Descending))
+$global:Controls.dgConnectionClients.ItemsSource = $global:ConnectionClientRecorder.Items
+$global:Controls.dgConnectionClients.Items.SortDescriptions.Add([System.ComponentModel.SortDescription]::new("Connections", [System.ComponentModel.ListSortDirection]::Descending))
 
 # Dashboard initialisieren
 Show-Panel "dashboard"
