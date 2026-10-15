@@ -4,6 +4,7 @@
 
 | Version | Supported |
 |---------|-----------|
+| 0.4.x   | Yes |
 | 0.3.x   | Yes |
 | < 0.3   | No (removed from the repository) |
 
@@ -25,4 +26,5 @@ You will receive a response as soon as possible; fixes are documented in [CHANGE
 - Import files are limited to 100 MB and every record is validated before it is written.
 - The script is not signed as of 0.3.0. Verify the source and sign it yourself if your policy requires `AllSigned` (see README).
 - Log files (`src/Logs/`) can contain server and zone names. Protect the folder accordingly.
+- Query client lists and their CSV exports contain client IP addresses and queried names (personal data). Store them only as long as needed. Queried names come from clients; the CSV export neutralizes leading formula characters (`= + - @`).
 - DNSSEC: 1024-bit RSA keys are no longer offered; use 2048 bit or more, or ECDSA.
