@@ -23,7 +23,7 @@ PowerShell-basiertes Verwaltungstool für die Windows-DNS-Server-Rolle mit WPF-O
 | Diagnostics | Ping, nslookup, resolve test, connection test, cache, service control (also remote), server configuration, forwarders, zone refresh/transfer, event logs, debug logging |
 | Advanced tools | DNS benchmark, latency test, leak test, traceroute, health report |
 | Monitoring | Query/error/security monitoring from counters and event logs, real-time monitor, top queries (DNS debug log), response time and throughput analysis |
-| Audit & logs | Event list with filter/search, export; **query clients**: one row per client IP with query count, first/last seen and queried names (name filter, CSV export) |
+| Audit & logs | Event list with filter/search, export; **query clients**: one row per client IP with query count, first/last seen and queried names (name filter, CSV export); **connection clients**: one row per client IP with connections and ports of a target server from its Windows Firewall log (CSV export) |
 
 ## Requirements / Voraussetzungen
 
@@ -84,7 +84,9 @@ Configuration is inline at the top of `src/easyDNS.ps1` (`$global:AppConfig`):
 | `DefaultTTL` | `3600` | Default TTL for new records |
 | `DebugMode` | `$false` | Additional debug logging |
 | `QueryClientMaxClients` | `5000` | Max. number of client IPs in the query client list |
-| `QueryClientMaxReadMB` | `4` | Max. MB of the DNS debug log read per monitoring cycle (the rest follows in the next cycle) |
+| `QueryClientMaxReadMB` | `32` | Max. MB of the DNS debug log read per monitoring cycle, processed in 4 MB blocks (the rest follows in the next cycle) |
+| `ConnectionClientMaxClients` | `5000` | Max. number of client IPs in the connection client list |
+| `ConnectionClientMaxReadMB` | `32` | Max. MB of the firewall log read per monitoring cycle, processed in 4 MB blocks |
 
 ## Query clients – which devices still use a server? / Welche Geräte nutzen einen Server noch?
 
@@ -98,10 +100,31 @@ Beispiel: Ein alter Exchange-Server soll abgelöst werden – welche Geräte nut
 
 Notes:
 
-- DNS cannot see ports. A device that resolves the server name is a candidate; devices configured with the server's IP address do not appear. Clients cache answers for the record TTL, so the count is the number of DNS queries, not of connections.
-- Built for long recordings: every 30 s only the newly written part of the debug log is read (max. `QueryClientMaxReadMB`), memory grows with the number of IPs, not with the number of queries (limit `QueryClientMaxClients`, max. 5 names per IP). The table is only redrawn when the panel is visible.
+- DNS cannot see ports, and devices configured with the server's IP address never ask DNS. Clients cache answers for the record TTL, so the count is the number of DNS queries, not of connections. → Use **Connection clients** (below) on the old server itself.
+- Built for long recordings: every 30 s only the newly written part of the debug log is read (max. `QueryClientMaxReadMB`, in 4 MB blocks), memory grows with the number of IPs, not with the number of queries (limit `QueryClientMaxClients`, max. 5 names per IP). The table is only redrawn when the panel is visible.
 - Stop/Start continues the list if server and name filter are unchanged; otherwise a new recording starts. **Clear** empties the list.
 - Disable debug logging after the analysis – it costs DNS performance and the log contains client IP addresses.
+
+### Connection clients – ports and devices configured by IP / Ports und per IP eingerichtete Geräte
+
+The connection list reads the **Windows Firewall log of the old server** (target server). Every allowed inbound connection to one of the selected ports is counted, no matter whether the device found the server by name or uses its IP address.
+Die Liste wertet das **Firewall-Log des alten Servers** aus: jede erlaubte eingehende Verbindung auf die gewählten Ports wird gezählt – auch von Geräten, die direkt die IP-Adresse nutzen.
+
+1. *Audit & Logs → Connection Clients*: enter the **Target server** (e.g. `exch01`) and the **Ports** (default `25, 465, 587, 110, 995, 143, 993`).
+2. **Enable Logging** switches on "Log successful connections" in the Windows Firewall of the target server (profiles Domain, Private, Public; asks for confirmation). Alternatively on the server: `Set-NetFirewallProfile -Profile Domain,Private,Public -LogAllowed True`.
+3. Check **Connections** in *Live DNS Monitoring* and click **Start** (can also be checked while monitoring runs). For the DNS comparison keep **DNS Queries** checked with the old server's names in the name filter.
+4. Every client IP appears **once** with the number of connections, the ports used, first/last connection (log time) and **DNS Queries**:
+   - `> 0` – the device resolves the server name (changing the DNS record/alias may be enough),
+   - `0` – connections without a recorded DNS query: the device probably uses the **IP address** (or another DNS server / a cached answer) and must be reconfigured,
+   - empty – no query recording active.
+5. **Export CSV**, then **Disable Logging** after the analysis.
+
+Notes:
+
+- Requirements: administrator rights on the target server, access to its admin share (`\\server\ADMIN$`) and CIM/WinRM for reading/changing the firewall settings. The Windows Firewall must be enabled. A Group Policy can override the local logging setting (a warning is shown).
+- Clients behind NAT, a load balancer or a relay appear with the address of that device. Connections of the server to itself are ignored.
+- The firewall log rotates at its maximum size (`LogMaxSizeKilobytes`, default 4 MB) into `pfirewall.log.old`; easyDNS detects this and continues with the new file. Lines written between the last cycle and the rotation are not counted – on busy servers increase the size, e.g. `Set-NetFirewallProfile -Profile Domain,Private,Public -LogMaxSizeKilobytes 32767`.
+- Resources: same design as the query clients (only new log data, max. `ConnectionClientMaxReadMB` per cycle in 4 MB blocks, one entry per IP, limit `ConnectionClientMaxClients`). Processing the maximum of 32 MB in one cycle takes about 1 s in PowerShell 7 (several times longer in Windows PowerShell 5.1); normally a 30 s cycle contains far less data.
 
 ## Logging
 
@@ -118,6 +141,7 @@ Notes:
 | Script will not start | `Unblock-File`, check execution policy, start elevated |
 | Umlauts garbled | Make sure the file is saved as UTF-8 **with** BOM |
 | Top queries / query clients empty | Enable DNS debug logging (Diagnostics → Debug logging) |
+| Connection clients empty | Check the status line: enable "Log successful connections" on the target server (**Enable Logging**), check admin share / WinRM access and the ports |
 
 ## Known limitations / Bekannte Einschränkungen
 

@@ -27,4 +27,5 @@ You will receive a response as soon as possible; fixes are documented in [CHANGE
 - The script is not signed as of 0.3.0. Verify the source and sign it yourself if your policy requires `AllSigned` (see README).
 - Log files (`src/Logs/`) can contain server and zone names. Protect the folder accordingly.
 - Query client lists and their CSV exports contain client IP addresses and queried names (personal data). Store them only as long as needed. Queried names come from clients; the CSV export neutralizes leading formula characters (`= + - @`).
+- Connection clients: **Enable Logging** changes the Windows Firewall configuration of the target server (log allowed connections, all profiles) after a confirmation. The firewall log and the connection client list/CSV contain client IP addresses (personal data) – disable the logging after the analysis (**Disable Logging**). Target server and ports are validated before they are used in UNC paths or CIM calls.
 - DNSSEC: 1024-bit RSA keys are no longer offered; use 2048 bit or more, or ECDSA.
