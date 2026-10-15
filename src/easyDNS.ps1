@@ -5253,8 +5253,12 @@ function Read-DnsDebugLogDelta {
     $State.Pending = [int64]0
     if (-not (Test-Path -LiteralPath $State.LogPath -PathType Leaf)) {
         $State.LogFound = $false
-        # Wird die Datei spaeter angelegt, enthaelt sie nur neue Eintraege -> dann von Beginn an lesen
-        $State.Offset = [int64]0
+        # Nur wenn der Ordner erreichbar ist, fehlt die Datei wirklich: wird sie spaeter angelegt, enthaelt sie nur neue Eintraege -> von Beginn an lesen.
+        # Bei Netzwerk-/Zugriffsfehlern (UNC) Position behalten, sonst wuerde das gesamte Log erneut gezaehlt.
+        $folder = [System.IO.Path]::GetDirectoryName($State.LogPath)
+        if ($folder -and (Test-Path -LiteralPath $folder -PathType Container)) {
+            $State.Offset = [int64]0
+        }
         return $null
     }
     $State.LogFound = $true
